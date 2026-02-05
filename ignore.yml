@@ -1,0 +1,31 @@
+# NightWatch — Error patterns to ignore during analysis.
+# Errors matching these patterns will be filtered before ranking.
+
+ignore:
+  - pattern: "Net::ReadTimeout"
+    match: contains
+    reason: "Transient external service timeout"
+
+  - pattern: "Rack::Timeout"
+    match: contains
+    reason: "Long-running request timeout, tracked separately"
+
+  - pattern: "ActiveRecord::ConnectionTimeoutError"
+    match: contains
+    reason: "Connection pool exhaustion, self-resolving"
+
+  - pattern: "Errno::ECONNRESET"
+    match: contains
+    reason: "Network connection reset, transient"
+
+  - pattern: "OpenSSL::SSL::SSLError"
+    match: contains
+    reason: "SSL handshake failures, usually transient"
+
+  - pattern: "ActionController::RoutingError"
+    match: contains
+    reason: "404s from bots and scanners"
+
+  - pattern: "ActionController::InvalidAuthenticityToken"
+    match: contains
+    reason: "Expired CSRF tokens, user-recoverable"

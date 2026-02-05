@@ -1,0 +1,47 @@
+[project]
+name = "nightwatch"
+version = "0.1.0"
+description = "AI-powered production error analysis — run once, analyze everything, report, done."
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.77.0",
+    "PyGithub>=2.1.0",
+    "httpx>=0.26.0",
+    "slack-sdk>=3.27.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "certifi",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.15.0",
+]

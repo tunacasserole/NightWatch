@@ -1,5 +1,11 @@
 # NightsWatch - New Repo Proposal
 
+**Status**: Completed
+**Approved**: 2025-02-05
+**Completed**: 2025-02-05
+**Reviewer**: Claude (OpenSpec review)
+**Implementation Evidence**: The entire NightWatch codebase (`nightwatch/` package, `tests/`, `pyproject.toml`) IS this proposal's implementation. Commit: `dce5167` (Initial NightWatch implementation)
+
 ## The Problem with TheFixer
 
 TheFixer was built around a **webhook-driven, always-on server** pattern:

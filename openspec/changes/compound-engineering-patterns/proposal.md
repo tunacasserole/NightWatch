@@ -2,6 +2,9 @@
 
 **ID**: COMPOUND-001
 **Status**: Draft / Awaiting Approval
+
+> **Note**: ID COMPOUND-001 is reserved for this proposal. PR #3 (compound-product-integration) must use COMPOUND-002.
+
 **Author**: Claude (AI Assistant)
 **Date**: 2026-02-05
 **Source**: [EveryInc/compound-engineering-plugin](https://github.com/EveryInc/compound-engineering-plugin) (MIT License)
@@ -109,16 +112,7 @@ resolution_status: "fixed"
 ---
 ```
 
-**Before each analysis**, NightWatch searches this knowledge base:
-```python
-def search_prior_knowledge(error: ErrorGroup) -> list[PriorAnalysis]:
-    """Grep-first search: check frontmatter tags, then read matching docs."""
-    candidates = grep_frontmatter(
-        directory="knowledge/errors/",
-        fields={"error_class": error.error_class, "module": error.transaction}
-    )
-    return [parse_solution(path) for path in candidates]
-```
+**Before each analysis**, NightWatch searches this knowledge base using a grep-first strategy: score index entries by tag/field match, then read only the top matching documents. See [implementation-detail.md](./implementation-detail.md) for the full `search_prior_knowledge()` implementation.
 
 **Value**: Reduces redundant analysis. If NightWatch has seen `Net::ReadTimeout in ProductsController` before and proposed a circuit breaker fix, it feeds that prior analysis as context to Claude — resulting in faster, more accurate analysis that builds on past work.
 
@@ -482,7 +476,7 @@ These algorithms and designs are extractable from the MIT-licensed source:
 |------|----------------|----------------------|
 | YAML frontmatter parser | `src/utils/frontmatter.ts` | Python `pyyaml` + custom parser (trivial) |
 | Grep-first search strategy | `learnings-researcher` agent | `knowledge.py:search_prior_knowledge()` |
-| Agent definition schema | `src/types/claude.ts` | `AgentConfig` Pydantic model |
+| Agent definition schema | `src/types/claude.ts` | `AgentConfig` dataclass |
 | Solution document format | `compound-docs` skill | `knowledge.py:write_solution_doc()` |
 | Autonomous workflow chain | `/lfg` command | `runner.py` Step 12 compound phase |
 | Temperature inference | `claude-to-opencode.ts` | Not needed (single model use) |
@@ -529,14 +523,18 @@ These algorithms and designs are extractable from the MIT-licensed source:
 
 ## 10. Decisions Required
 
-| # | Decision | Options | Recommendation |
-|---|----------|---------|----------------|
-| 1 | Knowledge base location | `nightwatch/knowledge/` vs `~/.nightwatch/knowledge/` vs alongside `ignore.yml` | `nightwatch/knowledge/` — git-trackable, project-local |
-| 2 | Git-track knowledge? | Yes (shared learning) vs No (local-only) | **Yes** — the whole point is compound learning; sharing across team is valuable |
-| 3 | Phase 5 multi-agent | Implement now vs defer | **Defer** — prove Phases 1-4 first |
-| 4 | Agent config format | YAML frontmatter in Markdown vs pure YAML vs Python | **Markdown + frontmatter** — matches compound-engineering pattern, human-readable |
-| 5 | Knowledge search timing | Before analysis vs during (tool call) vs both | **Before** — inject as context in initial prompt, cheaper than tool calls |
-| 6 | Pattern detection | Per-run vs periodic batch | **Per-run** — simple, immediate feedback |
+Six open decisions are tracked in [decisions.md](./decisions.md). Summary:
+
+| # | Decision | Recommendation |
+|---|----------|----------------|
+| D1 | Knowledge base location | `nightwatch/knowledge/` — git-trackable, project-local |
+| D2 | Git-track knowledge? | **Hybrid** — patterns shared, raw errors local |
+| D3 | Phase 5 multi-agent | **Defer** — prove Phases 1-4 first |
+| D4 | Agent config format | **Markdown + YAML frontmatter** |
+| D5 | Knowledge search timing | **Before analysis** — inject in initial prompt |
+| D6 | Pattern detection | **Per-run** — simple, immediate feedback |
+
+See [decisions.md](./decisions.md) for full options analysis and trade-offs.
 
 ---
 

@@ -326,7 +326,7 @@ def _slugify(text: str) -> str:
 
 ### Runner Integration
 
-Add to `runner.py` after Step 11:
+Add to `runner.py` after Step 11. **Note**: `analyze_error()` in `analyzer.py` must also be updated to accept and forward the `prior_analyses` parameter to `build_analysis_prompt()`.
 
 ```python
 from nightwatch.knowledge import compound_analysis, rebuild_index, search_prior_knowledge
@@ -338,7 +338,7 @@ for error in top_errors:
     if prior:
         prior_knowledge[id(error)] = prior
 
-# Pass to analyzer:
+# Pass to analyzer (requires adding prior_analyses param to analyze_error):
 result = analyze_error(
     error=error,
     traces=traces_map[id(error)],

@@ -59,7 +59,7 @@
 | Pure YAML | Simple parsing, widely supported | Less readable for long prompts |
 | Python files | Full flexibility, type safety | Requires Python knowledge to configure |
 
-**Recommendation**: **Markdown + YAML frontmatter** — This is the pattern proven by compound-engineering. System prompts are naturally prose (Markdown). Configuration metadata is naturally structured (YAML). The combination is elegant and already has library support (`python-frontmatter`).
+**Recommendation**: **Markdown + YAML frontmatter** — This is the pattern proven by compound-engineering. System prompts are naturally prose (Markdown). Configuration metadata is naturally structured (YAML). The combination is elegant and simple to parse with `pyyaml` (already a project dependency).
 
 **Status**: PENDING
 

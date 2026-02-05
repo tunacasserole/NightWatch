@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     nightwatch_knowledge_dir: str = "nightwatch/knowledge"
     nightwatch_compound_enabled: bool = True
 
+    # Compound product integration
+    nightwatch_health_report: bool = True
+    nightwatch_quality_tracking: bool = True
+    nightwatch_schedule: str = "0 6 * * 1-5"  # Default: 6 AM weekdays
+    nightwatch_schedule_timezone: str = "UTC"
+
     # Optional — Opik observability (disabled if not set)
     opik_api_key: str | None = None
     opik_workspace: str | None = None

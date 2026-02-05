@@ -18,6 +18,7 @@ from nightwatch.correlation import (
     format_correlated_prs,
 )
 from nightwatch.github import GitHubClient
+from nightwatch.health import HealthReport
 from nightwatch.knowledge import (
     compound_result,
     rebuild_index,
@@ -43,6 +44,7 @@ from nightwatch.patterns import (
     suggest_ignore_updates,
     write_pattern_doc,
 )
+from nightwatch.quality import QualityTracker
 from nightwatch.research import ResearchContext, research_error
 from nightwatch.slack import SlackClient
 from nightwatch.validation import validate_file_changes
@@ -176,6 +178,11 @@ def run(
         multi_pass_retries = 0
         pr_validation_failures = 0
 
+        # Self-health and quality tracking
+        health = HealthReport()
+        health.check_configuration()
+        quality_tracker = QualityTracker()
+
         for i, error in enumerate(top_errors, 1):
             logger.info(
                 f"Analyzing {i}/{len(top_errors)}: "
@@ -199,13 +206,35 @@ def run(
                 if result.pass_count > 1:
                     multi_pass_retries += 1
 
+                # Record health + quality signals
+                health.record_analysis(success=True, tokens_used=result.tokens_used)
+                quality_tracker.record_signal(
+                    error_class=error.error_class,
+                    transaction=error.transaction,
+                    confidence=_confidence_float(result.analysis.confidence),
+                    iterations_used=result.iterations,
+                    tokens_used=result.tokens_used,
+                    had_file_changes=bool(result.analysis.file_changes),
+                    had_root_cause=bool(result.analysis.root_cause),
+                )
+
             except Exception as e:
                 logger.error(f"Analysis failed for {error.error_class}: {e}")
+                health.record_analysis(success=False, error_msg=str(e))
                 # Fail forward — skip this error, continue
 
             # Brief pause between errors to help with rate limits
             if i < len(top_errors):
                 time.sleep(5)
+
+        # Save quality signals and log health
+        quality_tracker.save()
+        health_report_data = health.generate()
+        logger.info(
+            f"Health: {health_report_data['health']['status']} | "
+            f"Success rate: {health_report_data['analysis']['success_rate']}% | "
+            f"Cost: ${health_report_data['resources']['estimated_cost_usd']:.4f}"
+        )
 
         # ------------------------------------------------------------------
         # Step 5: Build report
@@ -639,6 +668,11 @@ Respond with the same JSON structure as the original analysis, but with correcte
     except Exception as e:
         logger.error(f"  Correction failed: {e}")
         return None
+
+
+def _confidence_float(confidence: str) -> float:
+    """Convert confidence string to float for quality tracking."""
+    return {"high": 0.9, "medium": 0.6, "low": 0.2}.get(str(confidence).lower(), 0.0)
 
 
 def _print_dry_run_summary(report: RunReport) -> None:

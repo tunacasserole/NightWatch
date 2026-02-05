@@ -148,7 +148,17 @@ def _build_report_blocks(report: RunReport) -> list[dict]:
                 {"type": "mrkdwn", "text": f"*Filtered:* {report.errors_filtered}"},
                 {"type": "mrkdwn", "text": f"*Analyzed:* {report.errors_analyzed}"},
                 {"type": "mrkdwn", "text": f"*Fixes Found:* {report.fixes_found}"},
-            ],
+            ]
+            + (
+                [{"type": "mrkdwn", "text": f"*Retried:* {report.multi_pass_retries}"}]
+                if report.multi_pass_retries > 0
+                else []
+            )
+            + (
+                [{"type": "mrkdwn", "text": f"*PR Gate Fails:* {report.pr_validation_failures}"}]
+                if report.pr_validation_failures > 0
+                else []
+            ),
         },
         {"type": "divider"},
     ]
@@ -176,6 +186,55 @@ def _build_report_blocks(report: RunReport) -> list[dict]:
                     f"`{error.transaction}` · {error.occurrences} occurrences\n"
                     f"{analysis.reasoning[:200]}{'...' if len(analysis.reasoning) > 200 else ''}\n"
                     f"Confidence: *{analysis.confidence.upper()}* · {status}"
+                ),
+            },
+        })
+
+    # Patterns section (if any detected)
+    if report.patterns:
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f":mag: *Cross-Error Patterns ({len(report.patterns)} detected)*",
+            },
+        })
+        for pattern in report.patterns[:5]:  # Cap at 5 patterns
+            type_emoji = {
+                "recurring_error": ":repeat:",
+                "systemic_issue": ":warning:",
+                "transient_noise": ":cloud:",
+            }
+            emoji = type_emoji.get(pattern.pattern_type, ":pushpin:")
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"{emoji} *{pattern.title}*\n"
+                        f"{pattern.description[:200]}"
+                        f"{'...' if len(pattern.description) > 200 else ''}\n"
+                        f"_{pattern.suggestion}_"
+                    ),
+                },
+            })
+
+    # Ignore suggestions section (if any)
+    if report.ignore_suggestions:
+        blocks.append({"type": "divider"})
+        suggestions_text = "\n".join(
+            f"• `{s.pattern}` ({s.match}) — {s.reason}"
+            for s in report.ignore_suggestions[:3]
+        )
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f":no_entry_sign: *Ignore Suggestions "
+                    f"({len(report.ignore_suggestions)})*\n"
+                    f"{suggestions_text}"
                 ),
             },
         })

@@ -30,6 +30,22 @@ class Settings(BaseSettings):
     nightwatch_max_open_issues: int = 10
     github_base_branch: str = "main"
 
+    # Multi-pass analysis (Ralph pattern: retry low-confidence with seed knowledge)
+    nightwatch_multi_pass_enabled: bool = True
+    nightwatch_max_passes: int = 2
+
+    # Run context accumulation (Ralph pattern: cross-error knowledge sharing)
+    nightwatch_run_context_enabled: bool = True
+    nightwatch_run_context_max_chars: int = 1500
+
+    # Quality gate (Ralph pattern: validate before committing)
+    nightwatch_quality_gate_enabled: bool = True
+    nightwatch_quality_gate_correction: bool = True
+
+    # Compound engineering (knowledge compounding across runs)
+    nightwatch_knowledge_dir: str = "nightwatch/knowledge"
+    nightwatch_compound_enabled: bool = True
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

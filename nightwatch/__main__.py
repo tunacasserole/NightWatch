@@ -35,6 +35,10 @@ def main() -> int:
     )
     run_parser.add_argument("--verbose", action="store_true", help="Show iteration details")
     run_parser.add_argument("--model", default=None, help="Override Claude model")
+    run_parser.add_argument(
+        "--agent", default="base-analyzer",
+        help="Agent config name (from nightwatch/agents/*.md)",
+    )
 
     # --- check ---
     sub.add_parser("check", help="Validate config and API connectivity")
@@ -50,6 +54,7 @@ def main() -> int:
         args.dry_run = False
         args.verbose = False
         args.model = None
+        args.agent = "base-analyzer"
 
     # Set up logging
     level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
@@ -142,6 +147,7 @@ def _run(args: argparse.Namespace) -> int:
             dry_run=args.dry_run,
             verbose=args.verbose,
             model=args.model,
+            agent_name=args.agent,
         )
         return 0
     except KeyboardInterrupt:

@@ -6,6 +6,8 @@ from nightwatch.models import (
     ErrorAnalysisResult,
     ErrorGroup,
     FileChange,
+    FileValidationResult,
+    RunContext,
     RunReport,
     TraceData,
 )
@@ -98,3 +100,60 @@ def test_run_report_properties():
 
     assert report.fixes_found == 1
     assert report.high_confidence == 1
+
+
+# ---------------------------------------------------------------------------
+# New model defaults (Phase 0: Ralph pattern adoption)
+# ---------------------------------------------------------------------------
+
+
+def test_error_analysis_result_new_defaults():
+    """New fields have safe defaults for backward compatibility."""
+    result = ErrorAnalysisResult(
+        error=ErrorGroup(
+            error_class="Err",
+            transaction="tx",
+            message="msg",
+            occurrences=1,
+            last_seen="",
+        ),
+        analysis=Analysis(
+            title="t",
+            reasoning="r",
+            root_cause="rc",
+            has_fix=False,
+            confidence=Confidence.LOW,
+        ),
+        traces=TraceData(),
+    )
+    assert result.pass_count == 1
+    assert result.context_files_contributed == 0
+
+
+def test_run_report_new_defaults():
+    """New RunReport fields default to zero."""
+    report = RunReport(
+        timestamp="2026-02-05T00:00:00Z",
+        lookback="10 minutes",
+        total_errors_found=0,
+        errors_filtered=0,
+        errors_analyzed=0,
+        analyses=[],
+    )
+    assert report.multi_pass_retries == 0
+    assert report.pr_validation_failures == 0
+
+
+def test_file_validation_result_defaults():
+    """FileValidationResult defaults."""
+    result = FileValidationResult(is_valid=True)
+    assert result.errors == []
+    assert result.warnings == []
+
+
+def test_run_context_defaults():
+    """RunContext initializes with empty collections."""
+    ctx = RunContext()
+    assert ctx.files_examined == {}
+    assert ctx.patterns_discovered == []
+    assert ctx.errors_analyzed == []

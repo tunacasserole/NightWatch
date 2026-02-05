@@ -42,3 +42,7 @@ uv.lock
 
 # Claude local error learning (machine-generated, session-specific)
 .claude/errors/
+
+# NightWatch knowledge base — error docs may contain sensitive stack traces
+nightwatch/knowledge/errors/
+nightwatch/knowledge/index.yml

@@ -1,4 +1,8 @@
-"""Claude agentic analysis loop — sync, single-pass, with prompt caching."""
+"""Claude agentic analysis loop — multi-pass with prompt caching.
+
+Implements the Ralph pattern: fresh context per pass with seed knowledge
+from prior passes. Low-confidence results get a retry with enriched context.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,15 @@ from typing import Any
 import anthropic
 
 from nightwatch.config import get_settings
-from nightwatch.models import Analysis, ErrorAnalysisResult, ErrorGroup, FileChange, TraceData
+from nightwatch.models import (
+    Analysis,
+    Confidence,
+    ErrorAnalysisResult,
+    ErrorGroup,
+    FileChange,
+    RunContext,
+    TraceData,
+)
 from nightwatch.prompts import SYSTEM_PROMPT, TOOLS, build_analysis_prompt, summarize_traces
 
 logger = logging.getLogger("nightwatch.analyzer")
@@ -27,14 +39,133 @@ def analyze_error(
     traces: TraceData,
     github_client: Any,
     newrelic_client: Any,
+    run_context: RunContext | None = None,
+    prior_analyses: list | None = None,
+    research_context: Any | None = None,
+    agent_name: str = "base-analyzer",
 ) -> ErrorAnalysisResult:
-    """Run Claude's agentic loop to analyze a single error.
+    """Run Claude's agentic loop to analyze a single error, with optional multi-pass retry.
+
+    If the first pass returns confidence='low' and multi-pass is enabled,
+    a second pass is attempted with the first pass's findings as seed context.
+    This implements the Ralph pattern: fresh context per iteration with
+    accumulated knowledge.
 
     Args:
         error: The error group to analyze.
         traces: Pre-fetched trace data for this error.
         github_client: GitHubClient instance (provides read_file, search_code, list_directory).
         newrelic_client: NewRelicClient instance (provides fetch_traces).
+        run_context: Optional accumulated run context for cross-error knowledge sharing.
+        prior_analyses: Optional prior analyses from knowledge base (Phase 1).
+        research_context: Optional pre-gathered research context (Phase 2).
+        agent_name: Agent definition to use for analysis (Phase 3).
+
+    Returns:
+        ErrorAnalysisResult with the best analysis result across passes.
+    """
+    settings = get_settings()
+
+    # Build seed from run_context if available
+    context_seed: str | None = None
+    if run_context and settings.nightwatch_run_context_enabled:
+        context_section = run_context.to_prompt_section(settings.nightwatch_run_context_max_chars)
+        if context_section:
+            context_seed = context_section
+
+    # Pass 1
+    result = _single_pass(
+        error=error,
+        traces=traces,
+        github_client=github_client,
+        newrelic_client=newrelic_client,
+        seed_context=context_seed,
+        prior_analyses=prior_analyses,
+        research_context=research_context,
+        agent_name=agent_name,
+    )
+
+    # Multi-pass retry logic
+    if (
+        settings.nightwatch_multi_pass_enabled
+        and result.analysis.confidence == Confidence.LOW
+        and settings.nightwatch_max_passes > 1
+    ):
+        logger.info(
+            f"  Pass 1 returned LOW confidence — retrying with seed knowledge "
+            f"(pass 2/{settings.nightwatch_max_passes})"
+        )
+
+        # Build seed from pass 1 findings + run context
+        retry_seed = _build_retry_seed(result)
+        if context_seed:
+            retry_seed = f"{retry_seed}\n\n{context_seed}"
+
+        pass1_result = result
+        result = _single_pass(
+            error=error,
+            traces=traces,
+            github_client=github_client,
+            newrelic_client=newrelic_client,
+            seed_context=retry_seed,
+            prior_analyses=prior_analyses,
+            research_context=research_context,
+            agent_name=agent_name,
+        )
+
+        # Accumulate totals from both passes
+        result.tokens_used += pass1_result.tokens_used
+        result.api_calls += pass1_result.api_calls
+        result.iterations += pass1_result.iterations
+        result.pass_count = 2
+
+        # Use pass 2 result only if it improved confidence
+        if _confidence_rank(result.analysis.confidence) < _confidence_rank(
+            pass1_result.analysis.confidence
+        ):
+            # Pass 2 didn't improve — keep pass 1's analysis but record the extra cost
+            result.analysis = pass1_result.analysis
+
+    # Record to run context
+    if run_context and settings.nightwatch_run_context_enabled:
+        run_context.record_analysis(
+            error_class=error.error_class,
+            transaction=error.transaction,
+            summary=result.analysis.root_cause[:200] if result.analysis.root_cause else "",
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Single-pass analysis (extracted from original analyze_error)
+# ---------------------------------------------------------------------------
+
+
+def _single_pass(
+    error: ErrorGroup,
+    traces: TraceData,
+    github_client: Any,
+    newrelic_client: Any,
+    seed_context: str | None = None,
+    prior_analyses: list | None = None,
+    research_context: Any | None = None,
+    agent_name: str = "base-analyzer",
+) -> ErrorAnalysisResult:
+    """Run a single Claude agentic loop to analyze an error.
+
+    This is the original analyze_error() body, extracted so the public
+    analyze_error() can orchestrate multiple passes.
+
+    Args:
+        error: The error group to analyze.
+        traces: Pre-fetched trace data for this error.
+        github_client: GitHubClient instance.
+        newrelic_client: NewRelicClient instance.
+        seed_context: Optional context to prepend (from prior pass or run context).
+        prior_analyses: Optional prior analyses from knowledge base.
+        research_context: Optional pre-gathered research context.
+        agent_name: Agent definition to use.
 
     Returns:
         ErrorAnalysisResult with the analysis, iteration count, and token usage.
@@ -52,7 +183,12 @@ def analyze_error(
         message=error.message,
         occurrences=error.occurrences,
         trace_summary=trace_summary,
+        prior_analyses=prior_analyses,
+        research_context=research_context,
     )
+
+    if seed_context:
+        initial_message += f"\n\n{seed_context}"
 
     messages: list[dict] = [{"role": "user", "content": initial_message}]
 
@@ -122,6 +258,41 @@ def analyze_error(
         tokens_used=total_tokens,
         api_calls=api_calls,
     )
+
+
+# ---------------------------------------------------------------------------
+# Multi-pass helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_retry_seed(result: ErrorAnalysisResult) -> str:
+    """Build seed context from a completed pass for retry.
+
+    Extracts the key findings from pass 1 so pass 2 starts with
+    prior knowledge without the full conversation history.
+    """
+    parts = [
+        "## Previous Analysis Attempt (Confidence: LOW)",
+        f"**Root cause hypothesis**: {result.analysis.root_cause}",
+        f"**Reasoning so far**: {result.analysis.reasoning[:500]}",
+    ]
+    if result.analysis.file_changes:
+        files = ", ".join(fc.path for fc in result.analysis.file_changes[:5])
+        parts.append(f"**Files examined**: {files}")
+    if result.analysis.suggested_next_steps:
+        steps = "; ".join(result.analysis.suggested_next_steps[:3])
+        parts.append(f"**Suggested next steps**: {steps}")
+    parts.append(
+        "\nThis analysis had LOW confidence. Please investigate more deeply, "
+        "using different search strategies or examining additional code paths."
+    )
+    return "\n".join(parts)
+
+
+def _confidence_rank(confidence: str | Confidence) -> int:
+    """Convert confidence level to numeric rank for comparison."""
+    ranks = {"low": 0, "medium": 1, "high": 2}
+    return ranks.get(str(confidence).lower(), 0)
 
 
 # ---------------------------------------------------------------------------

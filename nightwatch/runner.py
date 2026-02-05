@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import UTC, datetime
+from typing import Any
+
+import anthropic
 
 from nightwatch.analyzer import analyze_error
 from nightwatch.config import get_settings
@@ -14,10 +18,18 @@ from nightwatch.correlation import (
     format_correlated_prs,
 )
 from nightwatch.github import GitHubClient
+from nightwatch.knowledge import (
+    compound_result,
+    rebuild_index,
+    search_prior_knowledge,
+    update_result_metadata,
+)
 from nightwatch.models import (
     CreatedIssueResult,
     CreatedPRResult,
     ErrorAnalysisResult,
+    PriorAnalysis,
+    RunContext,
     RunReport,
 )
 from nightwatch.newrelic import (
@@ -26,7 +38,14 @@ from nightwatch.newrelic import (
     load_ignore_patterns,
     rank_errors,
 )
+from nightwatch.patterns import (
+    detect_patterns_with_knowledge,
+    suggest_ignore_updates,
+    write_pattern_doc,
+)
+from nightwatch.research import ResearchContext, research_error
 from nightwatch.slack import SlackClient
+from nightwatch.validation import validate_file_changes
 
 logger = logging.getLogger("nightwatch")
 
@@ -38,6 +57,7 @@ def run(
     dry_run: bool | None = None,
     verbose: bool = False,
     model: str | None = None,
+    agent_name: str = "base-analyzer",
 ) -> RunReport:
     """Execute the full NightWatch pipeline.
 
@@ -101,10 +121,55 @@ def run(
             traces_map[id(error)] = nr.fetch_traces(error, since=since)
 
         # ------------------------------------------------------------------
-        # Step 4: Analyze each error with Claude
+        # Step 3.5: Search knowledge base for prior analyses
+        # ------------------------------------------------------------------
+        prior_knowledge_map: dict[int, list[PriorAnalysis]] = {}
+        if settings.nightwatch_compound_enabled:
+            logger.info("Searching knowledge base for prior analyses...")
+            for error in top_errors:
+                try:
+                    prior = search_prior_knowledge(error)
+                    if prior:
+                        prior_knowledge_map[id(error)] = prior
+                        logger.info(
+                            f"  Found {len(prior)} prior analyses for {error.error_class}"
+                        )
+                except Exception as e:
+                    logger.warning(f"  Knowledge search failed for {error.error_class}: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 3.7: Pre-analysis research (file inference + pre-fetch)
+        # ------------------------------------------------------------------
+        research_map: dict[int, ResearchContext] = {}
+        logger.info("Running pre-analysis research...")
+        correlated_prs_early = fetch_recent_merged_prs(gh.repo, hours=24)
+        for error in top_errors:
+            try:
+                ctx = research_error(
+                    error=error,
+                    traces=traces_map[id(error)],
+                    github_client=gh,
+                    correlated_prs=correlate_error_with_prs(error, correlated_prs_early),
+                    prior_analyses=prior_knowledge_map.get(id(error)),
+                )
+                if ctx.likely_files or ctx.file_previews:
+                    research_map[id(error)] = ctx
+                    logger.info(
+                        f"  Research for {error.error_class}: "
+                        f"{len(ctx.likely_files)} files, "
+                        f"{len(ctx.file_previews)} previews"
+                    )
+            except Exception as e:
+                logger.warning(f"  Research failed for {error.error_class}: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 4: Analyze each error with Claude (with RunContext sharing)
         # ------------------------------------------------------------------
         logger.info("Starting Claude analysis...")
         analyses: list[ErrorAnalysisResult] = []
+        run_context = RunContext()  # Shared across all errors in this run
+        multi_pass_retries = 0
+        pr_validation_failures = 0
 
         for i, error in enumerate(top_errors, 1):
             logger.info(
@@ -118,8 +183,17 @@ def run(
                     traces=traces_map[id(error)],
                     github_client=gh,
                     newrelic_client=nr,
+                    run_context=run_context,
+                    prior_analyses=prior_knowledge_map.get(id(error)),
+                    research_context=research_map.get(id(error)),
+                    agent_name=agent_name,
                 )
                 analyses.append(result)
+
+                # Track multi-pass retries for reporting
+                if result.pass_count > 1:
+                    multi_pass_retries += 1
+
             except Exception as e:
                 logger.error(f"Analysis failed for {error.error_class}: {e}")
                 # Fail forward — skip this error, continue
@@ -145,7 +219,26 @@ def run(
             total_tokens_used=total_tokens,
             total_api_calls=total_api_calls,
             run_duration_seconds=elapsed,
+            multi_pass_retries=multi_pass_retries,
         )
+
+        # ------------------------------------------------------------------
+        # Step 5.5: Detect cross-error patterns (with knowledge base)
+        # ------------------------------------------------------------------
+        try:
+            patterns = detect_patterns_with_knowledge(analyses)
+            if patterns:
+                report.patterns = patterns
+                logger.info(f"Detected {len(patterns)} cross-error patterns")
+                for p in patterns:
+                    logger.info(f"  Pattern: {p.title} ({p.occurrences} errors)")
+
+            ignores = suggest_ignore_updates(analyses)
+            if ignores:
+                report.ignore_suggestions = ignores
+                logger.info(f"Generated {len(ignores)} ignore suggestions")
+        except Exception as e:
+            logger.error(f"Pattern detection failed: {e}")
 
         logger.info(
             f"Analysis complete: {report.errors_analyzed} analyzed, "
@@ -216,11 +309,49 @@ def run(
         report.issues_created = issues_created
 
         # ------------------------------------------------------------------
-        # Step 10: Create draft PR for highest-confidence fix
+        # Step 10: Validate and create draft PR for highest-confidence fix
         # ------------------------------------------------------------------
         pr_result: CreatedPRResult | None = None
 
         best_fix = _best_fix_candidate(analyses, issues_created)
+        if best_fix:
+            result, issue_number = best_fix
+
+            # Quality gate: validate file changes before creating PR
+            if settings.nightwatch_quality_gate_enabled and result.analysis.file_changes:
+                validation = validate_file_changes(result.analysis, gh)
+
+                if not validation.is_valid:
+                    logger.warning(
+                        f"  Quality gate failed ({len(validation.errors)} errors)"
+                    )
+
+                    if settings.nightwatch_quality_gate_correction:
+                        logger.info("  Attempting correction...")
+                        corrected = _attempt_correction(result, validation, gh, nr)
+                        if corrected:
+                            revalidation = validate_file_changes(corrected.analysis, gh)
+                            if revalidation.is_valid:
+                                logger.info("  Correction succeeded — quality gate passed")
+                                result = corrected
+                                validation = revalidation
+                            else:
+                                logger.warning("  Correction failed re-validation — skipping PR")
+                                pr_validation_failures += 1
+                                best_fix = None
+                        else:
+                            logger.warning("  Correction attempt failed — skipping PR")
+                            pr_validation_failures += 1
+                            best_fix = None
+                    else:
+                        logger.warning("  Skipping PR (correction disabled)")
+                        pr_validation_failures += 1
+                        best_fix = None
+
+                # Log warnings even on success
+                for warn in validation.warnings:
+                    logger.info(f"  ⚠ {warn}")
+
         if best_fix:
             result, issue_number = best_fix
             try:
@@ -230,6 +361,8 @@ def run(
             except Exception as e:
                 logger.error(f"PR creation failed: {e}")
 
+        report.pr_validation_failures = pr_validation_failures
+
         # ------------------------------------------------------------------
         # Step 11: Send Slack follow-up with issue/PR links
         # ------------------------------------------------------------------
@@ -238,6 +371,41 @@ def run(
                 slack.send_followup(issues_created, pr_result)
             except Exception as e:
                 logger.error(f"Slack follow-up failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 12: Compound — persist analysis results to knowledge base
+        # ------------------------------------------------------------------
+        if not dry_run and settings.nightwatch_compound_enabled:
+            try:
+                logger.info("Persisting analysis results to knowledge base...")
+                for a_result in analyses:
+                    compound_result(a_result)
+
+                # Persist detected patterns
+                for pattern in report.patterns:
+                    try:
+                        write_pattern_doc(pattern)
+                    except Exception as e:
+                        logger.warning(f"  Pattern doc failed: {e}")
+
+                # Back-fill issue/PR numbers
+                for issue_result in issues_created:
+                    update_result_metadata(
+                        error_class=issue_result.error.error_class,
+                        transaction=issue_result.error.transaction,
+                        issue_number=issue_result.issue_number,
+                    )
+                if pr_result and best_fix:
+                    pr_error_result, _ = best_fix
+                    update_result_metadata(
+                        error_class=pr_error_result.error.error_class,
+                        transaction=pr_error_result.error.transaction,
+                        pr_number=pr_result.pr_number,
+                    )
+
+                rebuild_index()
+            except Exception as e:
+                logger.error(f"Knowledge compounding failed: {e}")
 
         elapsed_final = time.time() - start_time
         report.run_duration_seconds = elapsed_final
@@ -341,6 +509,133 @@ def _best_fix_candidate(
     return None
 
 
+def _attempt_correction(
+    result: ErrorAnalysisResult,
+    validation: Any,
+    github_client: Any,
+    newrelic_client: Any,
+) -> ErrorAnalysisResult | None:
+    """One-shot correction: send validation errors to Claude, get fixed file_changes.
+
+    Creates a fresh Claude conversation with the validation errors and
+    original analysis, asking Claude to fix the specific issues found.
+
+    Returns corrected ErrorAnalysisResult or None on failure.
+    """
+    from nightwatch.models import Analysis, FileChange
+    from nightwatch.prompts import SYSTEM_PROMPT
+
+    settings = get_settings()
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+    # Build correction prompt
+    error_list = "\n".join(f"- {e}" for e in validation.errors)
+    warning_list = (
+        "\n".join(f"- {w}" for w in validation.warnings) if validation.warnings else "None"
+    )
+
+    file_changes_desc = "\n".join(
+        f"- {fc.action} {fc.path}: {fc.description}" for fc in result.analysis.file_changes
+    )
+
+    correction_prompt = f"""## Correction Request
+
+Your previous analysis proposed file changes that failed validation.
+
+### Original Analysis
+**Title**: {result.analysis.title}
+**Root Cause**: {result.analysis.root_cause}
+
+### Proposed File Changes
+{file_changes_desc}
+
+### Validation Errors (MUST FIX)
+{error_list}
+
+### Validation Warnings
+{warning_list}
+
+Please provide corrected file changes that fix all validation errors.
+Respond with the same JSON structure as the original analysis, but with corrected file_changes.
+
+```json
+{{
+    "title": "...",
+    "reasoning": "...",
+    "root_cause": "...",
+    "has_fix": true,
+    "confidence": "...",
+    "file_changes": [
+        {{"path": "...", "action": "modify|create", "content": "...", "description": "..."}}
+    ],
+    "suggested_next_steps": []
+}}
+```"""
+
+    try:
+        response = client.messages.create(
+            model=settings.nightwatch_model,
+            max_tokens=8192,
+            system=[{"type": "text", "text": SYSTEM_PROMPT}],
+            messages=[{"role": "user", "content": correction_prompt}],
+        )
+
+        # Parse response
+        text = ""
+        for block in response.content:
+            if hasattr(block, "text"):
+                text += block.text
+
+        # Try to extract JSON
+        json_start = text.find("```json")
+        json_end = text.find("```", json_start + 7) if json_start != -1 else -1
+
+        if json_start != -1 and json_end != -1:
+            json_str = text[json_start + 7 : json_end].strip()
+            data = json.loads(json_str)
+        else:
+            data = json.loads(text)
+
+        file_changes = [
+            FileChange(
+                path=fc["path"],
+                action=fc.get("action", "modify"),
+                content=fc.get("content"),
+                description=fc.get("description", ""),
+            )
+            for fc in data.get("file_changes", [])
+        ]
+
+        corrected_analysis = Analysis(
+            title=data.get("title", result.analysis.title),
+            reasoning=data.get("reasoning", result.analysis.reasoning),
+            root_cause=data.get("root_cause", result.analysis.root_cause),
+            has_fix=data.get("has_fix", True),
+            confidence=data.get("confidence", result.analysis.confidence),
+            file_changes=file_changes,
+            suggested_next_steps=data.get(
+                "suggested_next_steps", result.analysis.suggested_next_steps
+            ),
+        )
+
+        # Build corrected result, preserving original metadata
+        corrected = ErrorAnalysisResult(
+            error=result.error,
+            analysis=corrected_analysis,
+            traces=result.traces,
+            iterations=result.iterations,
+            tokens_used=result.tokens_used,
+            api_calls=result.api_calls + 1,
+            pass_count=result.pass_count,
+        )
+
+        return corrected
+
+    except Exception as e:
+        logger.error(f"  Correction failed: {e}")
+        return None
+
+
 def _print_dry_run_summary(report: RunReport) -> None:
     """Print a summary for dry-run mode (no side effects)."""
     print(f"\n{'='*60}")
@@ -354,6 +649,10 @@ def _print_dry_run_summary(report: RunReport) -> None:
     print(f"  Tokens used:     {report.total_tokens_used:,}")
     print(f"  API calls:       {report.total_api_calls}")
     print(f"  Duration:        {report.run_duration_seconds:.1f}s")
+    if report.multi_pass_retries:
+        print(f"  Multi-pass:      {report.multi_pass_retries} retries")
+    if report.pr_validation_failures:
+        print(f"  PR gate fails:   {report.pr_validation_failures}")
     print(f"{'='*60}")
 
     for i, result in enumerate(report.analyses, 1):
@@ -363,6 +662,8 @@ def _print_dry_run_summary(report: RunReport) -> None:
         print(f"\n  {i}. [{a.confidence.upper()}] {e.error_class}")
         print(f"     {e.transaction} ({e.occurrences} occurrences)")
         print(f"     Status: {status}")
+        if result.pass_count > 1:
+            print(f"     Passes: {result.pass_count}")
         print(f"     {a.reasoning[:150]}...")
 
     print()

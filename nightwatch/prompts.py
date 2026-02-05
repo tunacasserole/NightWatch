@@ -114,9 +114,11 @@ def build_analysis_prompt(
     message: str,
     occurrences: int,
     trace_summary: str,
+    prior_analyses: list | None = None,
+    research_context: object | None = None,
 ) -> str:
     """Build the initial user message for Claude's analysis of an error."""
-    return f"""Analyze this production error and propose a fix:
+    prompt = f"""Analyze this production error and propose a fix:
 
 ## Error Information
 - **Exception Class**: `{error_class}`
@@ -130,6 +132,49 @@ def build_analysis_prompt(
 **Instructions**: The `transactionName` tells you which controller/action \
 is failing. Use search_code to find the relevant code, then read_file to \
 examine it. Search for related models and services."""
+
+    # Phase 1: Prior knowledge from knowledge base
+    if prior_analyses:
+        prompt += "\n\n## Prior Knowledge\n\n"
+        prompt += (
+            "NightWatch has analyzed similar errors before. "
+            "Use this as context but verify independently — "
+            "the root cause may differ this time.\n\n"
+        )
+        for i, prior in enumerate(prior_analyses, 1):
+            prompt += f"### Prior Analysis #{i} (match: {prior.match_score:.0%})\n"
+            prompt += f"- **Error**: `{prior.error_class}` in `{prior.transaction}`\n"
+            prompt += f"- **Root cause**: {prior.root_cause}\n"
+            prompt += f"- **Confidence**: {prior.fix_confidence}\n"
+            prompt += f"- **Had fix**: {'Yes' if prior.has_fix else 'No'}\n"
+            prompt += f"- **Summary**: {prior.summary}\n\n"
+
+    # Phase 2: Pre-fetched research context (accepts ResearchContext dataclass)
+    if research_context is not None:
+        file_previews = getattr(research_context, "file_previews", {})
+        correlated_prs = getattr(research_context, "correlated_prs", [])
+
+        if file_previews:
+            prompt += "\n\n## Pre-Fetched Source Files\n\n"
+            prompt += (
+                "These files were identified as likely relevant based on the "
+                "transaction name and stack traces. You can read_file for full "
+                "content or search_code for related files.\n\n"
+            )
+            for path, content in file_previews.items():
+                prompt += f"### `{path}` (first 100 lines)\n```ruby\n{content}\n```\n\n"
+
+        if correlated_prs:
+            prompt += "\n\n## Recently Merged PRs (Possible Cause)\n\n"
+            for pr in correlated_prs[:3]:
+                changed = ", ".join(pr.changed_files[:5]) if pr.changed_files else "N/A"
+                prompt += (
+                    f"- **PR #{pr.number}**: {pr.title} "
+                    f"(merged {pr.merged_at}, overlap: {pr.overlap_score:.0%})\n"
+                    f"  Changed: {changed}\n"
+                )
+
+    return prompt
 
 
 def summarize_traces(traces: dict, max_errors: int = 3) -> str:

@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     nightwatch_knowledge_dir: str = "nightwatch/knowledge"
     nightwatch_compound_enabled: bool = True
 
+    # Optional — Opik observability (disabled if not set)
+    opik_api_key: str | None = None
+    opik_workspace: str | None = None
+    opik_project_name: str = "nightwatch"
+    opik_enabled: bool = True  # Can disable even if API key is set
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

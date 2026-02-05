@@ -24,6 +24,7 @@ from nightwatch.models import (
     RunContext,
     TraceData,
 )
+from nightwatch.observability import wrap_anthropic_client
 from nightwatch.prompts import SYSTEM_PROMPT, TOOLS, build_analysis_prompt, summarize_traces
 
 logger = logging.getLogger("nightwatch.analyzer")
@@ -172,6 +173,7 @@ def _single_pass(
     """
     settings = get_settings()
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = wrap_anthropic_client(client)
 
     # Build initial prompt
     trace_summary = summarize_traces(

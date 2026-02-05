@@ -75,6 +75,11 @@ def run(
     settings = get_settings()
     start_time = time.time()
 
+    # Initialize Opik tracing (no-op if unconfigured)
+    from nightwatch.observability import configure_opik
+
+    configure_opik()
+
     # Apply overrides
     since = since or settings.nightwatch_since
     max_errors = max_errors if max_errors is not None else settings.nightwatch_max_errors

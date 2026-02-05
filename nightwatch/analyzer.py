@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import time
 from typing import Any
 
@@ -132,8 +133,8 @@ def _call_claude_with_retry(
     client: anthropic.Anthropic,
     model: str,
     messages: list[dict],
-    max_retries: int = 3,
-    base_delay: float = 5.0,
+    max_retries: int = 5,
+    base_delay: float = 15.0,
 ) -> tuple[Any, int]:
     """Call Claude with retry logic and prompt caching.
 
@@ -176,9 +177,18 @@ def _call_claude_with_retry(
         except anthropic.APIStatusError as e:
             last_error = e
             if e.status_code in (429, 529):
-                delay = base_delay * (2**attempt)
+                # Check for retry-after header
+                retry_after = getattr(
+                    getattr(e, "response", None), "headers", {}
+                ).get("retry-after")
+                if retry_after:
+                    delay = float(retry_after) + random.uniform(1, 5)
+                else:
+                    delay = min(base_delay * (2**attempt), 120)
+                    delay += random.uniform(1, 5)  # jitter
                 logger.warning(
-                    f"  Rate limited ({e.status_code}), retrying in {delay:.0f}s "
+                    f"  Rate limited ({e.status_code}), "
+                    f"retrying in {delay:.0f}s "
                     f"(attempt {attempt + 1}/{max_retries})"
                 )
                 time.sleep(delay)

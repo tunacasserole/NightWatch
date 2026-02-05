@@ -124,6 +124,10 @@ def run(
                 logger.error(f"Analysis failed for {error.error_class}: {e}")
                 # Fail forward — skip this error, continue
 
+            # Brief pause between errors to help with rate limits
+            if i < len(top_errors):
+                time.sleep(5)
+
         # ------------------------------------------------------------------
         # Step 5: Build report
         # ------------------------------------------------------------------

@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 
 def main() -> int:
-    load_dotenv()
+    load_dotenv(override=True)
 
     parser = argparse.ArgumentParser(
         prog="nightwatch",

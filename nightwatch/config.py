@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     # Optional — with defaults
     nightwatch_max_errors: int = 5
     nightwatch_max_issues: int = 3
-    nightwatch_since: str = "24h"
+    nightwatch_since: str = "10 minutes"
     nightwatch_model: str = "claude-sonnet-4-5-20250929"
     nightwatch_max_iterations: int = 15
     nightwatch_dry_run: bool = False

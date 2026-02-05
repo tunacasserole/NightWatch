@@ -39,3 +39,6 @@ htmlcov/
 
 # uv
 uv.lock
+
+# Claude local error learning (machine-generated, session-specific)
+.claude/errors/

@@ -1,11 +1,12 @@
 # OpenSpec Proposal: compound-product Integration
 
-**ID**: COMPOUND-001
+**ID**: CP-001
 **Status**: Draft / Awaiting Approval
 **Author**: Claude (AI Assistant)
 **Date**: 2026-02-05
 **Scope**: Development workflow tooling / autonomous improvement loop
 **Repository Under Review**: https://github.com/snarktank/compound-product
+**Related**: [COMPOUND-001](../changes/compound-engineering-patterns/proposal.md) (complementary — see Section 10)
 
 ---
 
@@ -21,14 +22,14 @@ This proposal evaluates whether compound-product should be adopted to wrap or au
 
 ## 2. Problem Statement
 
-NightWatch improves *other* codebases by analyzing their production errors. But NightWatch itself has no automated self-improvement loop. Current gaps:
+NightWatch improves *other* codebases by analyzing their production errors, but has no automated self-improvement loop:
 
-1. **No automated triage of its own operational issues** — When NightWatch runs fail (API timeouts, token limits, bad analyses), nobody triages them systematically
-2. **No structured daily report of NightWatch's own health** — Run success rates, token costs, analysis quality, PR acceptance rates are not tracked
-3. **Manual improvement prioritization** — Deciding what to improve next in NightWatch is ad-hoc
-4. **No autonomous fix pipeline** — Even when issues are known, implementation requires a human to start a session
+1. **No operational triage** — Run failures (API timeouts, token limits, bad analyses) aren't triaged systematically
+2. **No health metrics** — Run success rates, token costs, analysis quality, PR acceptance rates are not tracked
+3. **Ad-hoc prioritization** — Deciding what to improve next in NightWatch is manual
+4. **No autonomous fix pipeline** — Known issues require a human to start an implementation session
 
-compound-product proposes to close this loop: NightWatch generates a daily report about itself, compound-product reads it, picks the highest-impact issue, and ships a PR to fix it.
+compound-product closes this loop: NightWatch emits a daily self-report, compound-product reads it, picks the highest-impact issue, and ships a PR to fix it.
 
 ---
 
@@ -78,35 +79,11 @@ auto-compound.sh ──→ git branch + GitHub PR for human review
 
 ### 4.2 Natural Integration Point
 
-NightWatch could generate a **self-health report** as part of its nightly run:
+NightWatch could generate a **self-health report** as part of its nightly run. The report would mirror data already available in `RunReport` (`runner.py:138-148`): `total_errors_found`, `errors_analyzed`, `total_tokens_used`, `run_duration_seconds`, plus failure/exception details logged during the run. This is ~200 LOC to serialize `RunReport` to structured markdown.
 
-```markdown
-# NightWatch Daily Self-Report — 2026-02-05
+compound-product reads this report, picks the highest-impact item, generates a PRD, implements a fix, and opens a PR.
 
-## Run Metrics
-- Errors fetched: 47
-- Errors analyzed: 12 (top-ranked)
-- Issues created: 3
-- Draft PRs created: 1
-- Total tokens used: 284,000 (~$4.26)
-- Run duration: 8m 42s
-
-## Failures
-- analyzer.py:198 — Claude hit max_iterations on error #7 (checkout TypeError)
-  - 5 tool calls, never found root cause
-  - Token cost: 48,000 tokens wasted
-- github.py:312 — Rate limited on search_code (3 retries, 2 failed)
-
-## Quality Signals
-- PR #34 merged (fix from 2 days ago) — NightWatch analysis was accurate
-- Issue #41 closed as duplicate — dedup check missed it (different error message, same root cause)
-- 0 PRs rejected this week
-
-## User Feedback
-- "The slack summary is too long, I skip it" — @ahenderson in #dev
-```
-
-compound-product reads this report, picks the highest-impact item (e.g., "duplicate detection misses same-root-cause errors"), generates a PRD, implements a fix, and opens a PR.
+> **Note**: COMPOUND-001 Phase 1 (Knowledge Foundation) proposes persisting analysis results as solution documents. The self-health report proposed here is complementary — it reports on NightWatch's *operational health* (run metrics, failures), not its *analysis outputs*.
 
 ---
 
@@ -143,7 +120,7 @@ compound-product reads this report, picks the highest-impact item (e.g., "duplic
 
 ### Verdict: **CONDITIONAL YES** — Adopt with Prerequisites
 
-compound-product is a clever, well-designed tool that directly addresses NightWatch's lack of a self-improvement loop. The philosophical alignment is strong, the integration surface is minimal (a markdown report), and the safety model (PR-based review) matches NightWatch's existing workflow.
+compound-product directly addresses NightWatch's lack of a self-improvement loop. The integration surface is minimal (a markdown report in, a PR out), and the safety model (PR-based review) matches NightWatch's existing workflow.
 
 However, adoption is **blocked** until:
 
@@ -226,3 +203,24 @@ After 30 days of operation:
 ---
 
 *This proposal will be updated when the license status of snarktank/compound-product is clarified.*
+
+---
+
+## 10. Cross-Reference: Relationship to COMPOUND-001 and RALPH-001
+
+This proposal (CP-001) is complementary to, not in conflict with, the other two proposals:
+
+| Concern | CP-001 (this) | COMPOUND-001 | RALPH-001 |
+|---------|---------------|--------------|-----------|
+| **Scope** | NightWatch improving *itself* | NightWatch improving *analysis quality* | NightWatch improving *analysis reliability* |
+| **Mechanism** | External tool (compound-product) wraps NightWatch | Native Python knowledge system inside NightWatch | Native Python retry/quality patterns inside NightWatch |
+| **Output** | PRs to NightWatch's own codebase | Better error analyses for target repos | Higher-confidence analyses + validated PRs |
+| **Dependency** | License resolution on compound-product | None (pure pattern adoption) | None (pure pattern adoption) |
+
+**If all three are approved**: COMPOUND-001 and RALPH-001 improve NightWatch's analysis pipeline. CP-001 then uses compound-product to improve NightWatch's *code* based on self-health reports. They operate at different layers and can coexist.
+
+---
+
+## 11. Path Inconsistency Note
+
+> This proposal is located at `openspec/compound-product-integration/` while other proposals use `openspec/changes/*/`. This should be normalized to `openspec/changes/compound-product-integration/` for consistency. Deferring the move to avoid merge conflicts with this PR.

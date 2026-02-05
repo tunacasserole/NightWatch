@@ -44,6 +44,7 @@ def analyze_error(
     prior_analyses: list | None = None,
     research_context: Any | None = None,
     agent_name: str = "base-analyzer",
+    prior_context: str | None = None,
 ) -> ErrorAnalysisResult:
     """Run Claude's agentic loop to analyze a single error, with optional multi-pass retry.
 
@@ -67,12 +68,14 @@ def analyze_error(
     """
     settings = get_settings()
 
-    # Build seed from run_context if available
+    # Build seed from run_context + prior_context if available
     context_seed: str | None = None
     if run_context and settings.nightwatch_run_context_enabled:
         context_section = run_context.to_prompt_section(settings.nightwatch_run_context_max_chars)
         if context_section:
             context_seed = context_section
+    if prior_context:
+        context_seed = f"{context_seed}\n\n{prior_context}" if context_seed else prior_context
 
     # Pass 1
     result = _single_pass(
@@ -139,6 +142,74 @@ def analyze_error(
 
 
 # ---------------------------------------------------------------------------
+# Context efficiency: adaptive iteration limits and thinking budgets
+# ---------------------------------------------------------------------------
+
+_SIMPLE_ERRORS = [
+    "nomethoderror", "nameerror", "argumenterror",
+    "typeerror", "keyerror", "attributeerror",
+]
+_AUTH_ERRORS = ["notauthorized", "forbidden", "authentication", "unauthorized"]
+_DB_ERRORS = ["activerecord", "pg::", "statementinvalid", "deadlock", "mysql"]
+_COMPLEX_ERRORS = ["systemstackerror", "timeout", "connectionerror", "nomemoryerror", "segfault"]
+
+
+def _calculate_max_iterations(error_class: str, settings_max: int) -> int:
+    """Calculate max iterations based on error type complexity."""
+    ec = error_class.lower() if error_class else ""
+    if any(p in ec for p in _SIMPLE_ERRORS):
+        return min(7, settings_max)
+    if any(p in ec for p in _AUTH_ERRORS):
+        return min(5, settings_max)
+    if any(p in ec for p in _DB_ERRORS):
+        return min(10, settings_max)
+    if any(p in ec for p in _COMPLEX_ERRORS):
+        return min(15, settings_max)
+    return min(10, settings_max)
+
+
+def _calculate_thinking_budget(iteration: int, max_iterations: int, error_class: str) -> int:
+    """Calculate thinking token budget based on iteration and error complexity."""
+    ec = error_class.lower() if error_class else ""
+    if any(p in ec for p in _SIMPLE_ERRORS):
+        base = 4000
+    elif any(p in ec for p in _COMPLEX_ERRORS):
+        base = 12000
+    else:
+        base = 8000
+    if iteration <= 2 or max_iterations <= 2:
+        scale = 1.0
+    else:
+        progress = (iteration - 2) / (max_iterations - 2)
+        scale = 1.0 - (0.75 * progress)
+    return max(2000, int(base * scale))
+
+
+# ---------------------------------------------------------------------------
+# Context efficiency: tool result truncation
+# ---------------------------------------------------------------------------
+
+TOOL_RESULT_LIMITS = {
+    "read_file": 8000,
+    "search_code": 4000,
+    "list_directory": 2000,
+    "get_error_traces": 4000,
+}
+
+
+def _truncate_tool_result(result: str, max_chars: int = 8000) -> str:
+    """Truncate long tool results while preserving beginning and end."""
+    if len(result) <= max_chars:
+        return result
+    half = max_chars // 2
+    return (
+        result[:half]
+        + f"\n\n[... {len(result) - max_chars} chars truncated ...]\n\n"
+        + result[-half:]
+    )
+
+
+# ---------------------------------------------------------------------------
 # Single-pass analysis (extracted from original analyze_error)
 # ---------------------------------------------------------------------------
 
@@ -195,21 +266,40 @@ def _single_pass(
     messages: list[dict] = [{"role": "user", "content": initial_message}]
 
     iteration = 0
-    max_iterations = settings.nightwatch_max_iterations
+    max_iterations = _calculate_max_iterations(
+        error.error_class, settings.nightwatch_max_iterations
+    )
+    logger.info(
+        f"  Error class {error.error_class} → max_iterations={max_iterations} "
+        f"(ceiling: {settings.nightwatch_max_iterations})"
+    )
     total_tokens = 0
     api_calls = 0
+    token_budget = getattr(settings, "nightwatch_token_budget_per_error", 30000)
 
     while iteration < max_iterations:
         iteration += 1
         if iteration > 1:
             time.sleep(1.5)  # Rate-limit protection
 
-        logger.info(f"  Iteration {iteration}/{max_iterations}")
+        # Adaptive thinking budget
+        thinking_budget = _calculate_thinking_budget(
+            iteration, max_iterations, error.error_class
+        )
+        logger.info(f"  Iteration {iteration}/{max_iterations} (thinking: {thinking_budget})")
+
+        # Token budget enforcement
+        if total_tokens > token_budget:
+            logger.warning(
+                f"  Token budget {total_tokens}/{token_budget} — forcing wrap-up"
+            )
+            break
 
         response, tokens = _call_claude_with_retry(
             client=client,
             model=settings.nightwatch_model,
             messages=messages,
+            thinking_budget=thinking_budget,
         )
         total_tokens += tokens
         api_calls += 1
@@ -308,6 +398,7 @@ def _call_claude_with_retry(
     messages: list[dict],
     max_retries: int = 5,
     base_delay: float = 15.0,
+    thinking_budget: int = 8000,
 ) -> tuple[Any, int]:
     """Call Claude with retry logic and prompt caching.
 
@@ -331,7 +422,7 @@ def _call_claude_with_retry(
                 messages=messages,
                 thinking={
                     "type": "enabled",
-                    "budget_tokens": 8000,
+                    "budget_tokens": thinking_budget,
                 },
             )
 
@@ -436,29 +527,32 @@ def _execute_single_tool(
     newrelic_client: Any,
 ) -> str:
     """Execute a single tool and return the result string."""
+    limit = TOOL_RESULT_LIMITS.get(tool_name, 8000)
+
     if tool_name == "read_file":
         content = github_client.read_file(tool_input["path"])
-        return content if content is not None else f"File not found: {tool_input['path']}"
+        result = content if content is not None else f"File not found: {tool_input['path']}"
+        return _truncate_tool_result(result, limit)
 
     if tool_name == "search_code":
         results = github_client.search_code(
             tool_input["query"], tool_input.get("file_extension")
         )
-        return json.dumps(results, indent=2) if results else "No matches found"
+        result = json.dumps(results, indent=2) if results else "No matches found"
+        return _truncate_tool_result(result, limit)
 
     if tool_name == "list_directory":
         contents = github_client.list_directory(tool_input["path"])
         if contents:
-            return json.dumps(contents, indent=2)
+            return _truncate_tool_result(json.dumps(contents, indent=2), limit)
         return f"Directory not found: {tool_input['path']}"
 
     if tool_name == "get_error_traces":
-        # Return pre-fetched traces (avoids extra NR calls during analysis)
         trace_data = {
             "transaction_errors": traces.transaction_errors,
             "error_traces": traces.error_traces,
         }
-        return json.dumps(trace_data, indent=2)
+        return _truncate_tool_result(json.dumps(trace_data, indent=2), limit)
 
     return f"Unknown tool: {tool_name}"
 

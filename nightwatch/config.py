@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     nightwatch_knowledge_dir: str = "nightwatch/knowledge"
     nightwatch_compound_enabled: bool = True
 
+    # Context efficiency
+    nightwatch_token_budget_per_error: int = 30000
+    nightwatch_total_token_budget: int = 200000
+
     # Compound product integration
     nightwatch_health_report: bool = True
     nightwatch_quality_tracking: bool = True

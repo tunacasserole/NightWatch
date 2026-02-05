@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from github import Github, GithubException
 from github.ContentFile import ContentFile
@@ -21,6 +21,40 @@ from nightwatch.models import (
 )
 
 logger = logging.getLogger("nightwatch.github")
+
+
+class CodeCache:
+    """Simple in-memory cache for file contents fetched from GitHub."""
+
+    def __init__(self, ttl_minutes: int = 30) -> None:
+        self._cache: dict[str, tuple[str, datetime]] = {}
+        self._ttl = timedelta(minutes=ttl_minutes)
+        self._hits = 0
+        self._misses = 0
+
+    def get(self, key: str) -> str | None:
+        if key in self._cache:
+            value, timestamp = self._cache[key]
+            if datetime.now() - timestamp < self._ttl:
+                self._hits += 1
+                return value
+            del self._cache[key]
+        self._misses += 1
+        return None
+
+    def set(self, key: str, value: str) -> None:
+        self._cache[key] = (value, datetime.now())
+
+    @property
+    def stats(self) -> dict:
+        total = self._hits + self._misses
+        return {
+            "total_requests": total,
+            "hits": self._hits,
+            "misses": self._misses,
+            "hit_rate": self._hits / total if total > 0 else 0.0,
+            "cached_files": len(self._cache),
+        }
 
 
 class GitHubClient:

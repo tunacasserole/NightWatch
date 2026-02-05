@@ -17,7 +17,7 @@ from nightwatch.correlation import (
     fetch_recent_merged_prs,
     format_correlated_prs,
 )
-from nightwatch.github import GitHubClient
+from nightwatch.github import CodeCache, GitHubClient
 from nightwatch.health import HealthReport
 from nightwatch.knowledge import (
     compound_result,
@@ -183,6 +183,10 @@ def run(
         health.check_configuration()
         quality_tracker = QualityTracker()
 
+        # Cross-error context and code cache
+        cross_error_context: list[str] = []
+        code_cache = CodeCache()
+
         for i, error in enumerate(top_errors, 1):
             logger.info(
                 f"Analyzing {i}/{len(top_errors)}: "
@@ -190,6 +194,14 @@ def run(
                 f"({error.occurrences} occurrences)"
             )
             try:
+                # Build cross-error prior context
+                prior_text = None
+                if cross_error_context:
+                    recent = cross_error_context[-4:]
+                    prior_text = (
+                        "Previously Analyzed Errors:\n" + "\n".join(recent)
+                    )
+
                 result = analyze_error(
                     error=error,
                     traces=traces_map[id(error)],
@@ -199,8 +211,27 @@ def run(
                     prior_analyses=prior_knowledge_map.get(id(error)),
                     research_context=research_map.get(id(error)),
                     agent_name=agent_name,
+                    prior_context=prior_text,
                 )
                 analyses.append(result)
+
+                # Build cross-error summary for subsequent analyses
+                root = (
+                    result.analysis.root_cause[:200]
+                    if result.analysis.root_cause
+                    else "Unknown"
+                )
+                files = ", ".join(
+                    fc.path
+                    for fc in (result.analysis.file_changes[:3])
+                ) if result.analysis.file_changes else ""
+                summary = (
+                    f"Error #{i}: {error.error_class} in "
+                    f"{error.transaction} — Root cause: {root}"
+                )
+                if files:
+                    summary += f". Files: {files}"
+                cross_error_context.append(summary)
 
                 # Track multi-pass retries for reporting
                 if result.pass_count > 1:
@@ -226,6 +257,9 @@ def run(
             # Brief pause between errors to help with rate limits
             if i < len(top_errors):
                 time.sleep(5)
+
+        # Log code cache stats
+        logger.info(f"Code cache: {code_cache.stats}")
 
         # Save quality signals and log health
         quality_tracker.save()

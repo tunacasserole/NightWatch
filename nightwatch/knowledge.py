@@ -221,6 +221,86 @@ def rebuild_index(knowledge_dir: str | None = None) -> None:
     logger.info(f"  Knowledge index rebuilt: {len(solutions)} solutions, {len(patterns)} patterns")
 
 
+def build_knowledge_context(
+    error: ErrorGroup,
+    max_results: int = 3,
+    max_chars: int = 1500,
+    knowledge_dir: str | None = None,
+) -> str:
+    """Search knowledge base and format results as a prompt context section.
+
+    Convenience function combining search_prior_knowledge + formatting.
+    Returns empty string if no relevant knowledge found.
+    """
+    prior = search_prior_knowledge(error, max_results=max_results, knowledge_dir=knowledge_dir)
+    if not prior:
+        return ""
+
+    parts = ["## Prior Knowledge from NightWatch Knowledge Base"]
+    for i, p in enumerate(prior, 1):
+        section = f"\n### Prior Analysis #{i} (match: {p.match_score:.1%})"
+        section += f"\n- **Error**: `{p.error_class}` in `{p.transaction}`"
+        section += f"\n- **Root Cause**: {p.root_cause[:200]}"
+        section += f"\n- **Had Fix**: {p.has_fix} (confidence: {p.fix_confidence})"
+        if p.summary:
+            section += f"\n- **Summary**: {p.summary[:200]}"
+        parts.append(section)
+
+    result = "\n".join(parts)
+    if len(result) > max_chars:
+        result = result[:max_chars - 20] + "\n\n[...truncated]"
+    return result
+
+
+def save_error_pattern(
+    error_class: str,
+    transaction: str,
+    pattern_description: str,
+    confidence: str = "medium",
+    knowledge_dir: str | None = None,
+) -> Path | None:
+    """Save a detected error pattern to the knowledge base patterns directory.
+
+    Used by runner.py to auto-persist high-confidence patterns discovered
+    during analysis for future reference.
+
+    Returns path to created doc or None on failure.
+    """
+    try:
+        settings = get_settings()
+        kb_dir = Path(knowledge_dir or settings.nightwatch_knowledge_dir)
+        patterns_dir = kb_dir / "patterns"
+        patterns_dir.mkdir(parents=True, exist_ok=True)
+
+        date_str = datetime.now(UTC).strftime("%Y-%m-%d")
+        slug = _slugify(f"{error_class}_{transaction}")
+        filename = f"{date_str}_{slug}.md"
+        doc_path = patterns_dir / filename
+
+        frontmatter = {
+            "title": f"Pattern: {error_class} in {transaction}",
+            "error_classes": [error_class],
+            "pattern_type": "recurring_error",
+            "confidence": confidence,
+            "first_detected": date_str,
+            "transaction": transaction,
+        }
+
+        body = (
+            f"# Pattern: {error_class}\n\n"
+            f"## Description\n\n{pattern_description}\n\n"
+            f"## Transaction\n\n`{transaction}`\n"
+        )
+
+        content = _render_frontmatter(frontmatter) + body
+        doc_path.write_text(content)
+        logger.info(f"  Saved error pattern: {filename}")
+        return doc_path
+    except Exception as e:
+        logger.warning(f"Failed to save error pattern: {e}")
+        return None
+
+
 def update_result_metadata(
     error_class: str,
     transaction: str,

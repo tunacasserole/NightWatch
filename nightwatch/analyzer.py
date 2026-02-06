@@ -24,6 +24,7 @@ from nightwatch.models import (
     RunContext,
     TraceData,
 )
+from nightwatch.observability import wrap_anthropic_client
 from nightwatch.prompts import SYSTEM_PROMPT, TOOLS, build_analysis_prompt, summarize_traces
 
 logger = logging.getLogger("nightwatch.analyzer")
@@ -43,6 +44,7 @@ def analyze_error(
     prior_analyses: list | None = None,
     research_context: Any | None = None,
     agent_name: str = "base-analyzer",
+    prior_context: str | None = None,
 ) -> ErrorAnalysisResult:
     """Run Claude's agentic loop to analyze a single error, with optional multi-pass retry.
 
@@ -66,12 +68,14 @@ def analyze_error(
     """
     settings = get_settings()
 
-    # Build seed from run_context if available
+    # Build seed from run_context + prior_context if available
     context_seed: str | None = None
     if run_context and settings.nightwatch_run_context_enabled:
         context_section = run_context.to_prompt_section(settings.nightwatch_run_context_max_chars)
         if context_section:
             context_seed = context_section
+    if prior_context:
+        context_seed = f"{context_seed}\n\n{prior_context}" if context_seed else prior_context
 
     # Pass 1
     result = _single_pass(
@@ -85,14 +89,19 @@ def analyze_error(
         agent_name=agent_name,
     )
 
+    # Quality gate: evaluate if retry is worthwhile
+    quality_score = _evaluate_analysis_quality(result)
+    logger.info(f"  Pass 1 quality score: {quality_score:.2f}")
+
     # Multi-pass retry logic
     if (
         settings.nightwatch_multi_pass_enabled
-        and result.analysis.confidence == Confidence.LOW
+        and quality_score < 0.5
         and settings.nightwatch_max_passes > 1
     ):
         logger.info(
-            f"  Pass 1 returned LOW confidence — retrying with seed knowledge "
+            f"  Pass 1 quality score {quality_score:.2f} below threshold — "
+            f"retrying with seed knowledge "
             f"(pass 2/{settings.nightwatch_max_passes})"
         )
 
@@ -126,6 +135,9 @@ def analyze_error(
             # Pass 2 didn't improve — keep pass 1's analysis but record the extra cost
             result.analysis = pass1_result.analysis
 
+    # Store final quality score
+    result.quality_score = _evaluate_analysis_quality(result)
+
     # Record to run context
     if run_context and settings.nightwatch_run_context_enabled:
         run_context.record_analysis(
@@ -135,6 +147,74 @@ def analyze_error(
         )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Context efficiency: adaptive iteration limits and thinking budgets
+# ---------------------------------------------------------------------------
+
+_SIMPLE_ERRORS = [
+    "nomethoderror", "nameerror", "argumenterror",
+    "typeerror", "keyerror", "attributeerror",
+]
+_AUTH_ERRORS = ["notauthorized", "forbidden", "authentication", "unauthorized"]
+_DB_ERRORS = ["activerecord", "pg::", "statementinvalid", "deadlock", "mysql"]
+_COMPLEX_ERRORS = ["systemstackerror", "timeout", "connectionerror", "nomemoryerror", "segfault"]
+
+
+def _calculate_max_iterations(error_class: str, settings_max: int) -> int:
+    """Calculate max iterations based on error type complexity."""
+    ec = error_class.lower() if error_class else ""
+    if any(p in ec for p in _SIMPLE_ERRORS):
+        return min(7, settings_max)
+    if any(p in ec for p in _AUTH_ERRORS):
+        return min(5, settings_max)
+    if any(p in ec for p in _DB_ERRORS):
+        return min(10, settings_max)
+    if any(p in ec for p in _COMPLEX_ERRORS):
+        return min(15, settings_max)
+    return min(10, settings_max)
+
+
+def _calculate_thinking_budget(iteration: int, max_iterations: int, error_class: str) -> int:
+    """Calculate thinking token budget based on iteration and error complexity."""
+    ec = error_class.lower() if error_class else ""
+    if any(p in ec for p in _SIMPLE_ERRORS):
+        base = 4000
+    elif any(p in ec for p in _COMPLEX_ERRORS):
+        base = 12000
+    else:
+        base = 8000
+    if iteration <= 2 or max_iterations <= 2:
+        scale = 1.0
+    else:
+        progress = (iteration - 2) / (max_iterations - 2)
+        scale = 1.0 - (0.75 * progress)
+    return max(2000, int(base * scale))
+
+
+# ---------------------------------------------------------------------------
+# Context efficiency: tool result truncation
+# ---------------------------------------------------------------------------
+
+TOOL_RESULT_LIMITS = {
+    "read_file": 8000,
+    "search_code": 4000,
+    "list_directory": 2000,
+    "get_error_traces": 4000,
+}
+
+
+def _truncate_tool_result(result: str, max_chars: int = 8000) -> str:
+    """Truncate long tool results while preserving beginning and end."""
+    if len(result) <= max_chars:
+        return result
+    half = max_chars // 2
+    return (
+        result[:half]
+        + f"\n\n[... {len(result) - max_chars} chars truncated ...]\n\n"
+        + result[-half:]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +252,7 @@ def _single_pass(
     """
     settings = get_settings()
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    client = wrap_anthropic_client(client)
 
     # Build initial prompt
     trace_summary = summarize_traces(
@@ -193,21 +274,40 @@ def _single_pass(
     messages: list[dict] = [{"role": "user", "content": initial_message}]
 
     iteration = 0
-    max_iterations = settings.nightwatch_max_iterations
+    max_iterations = _calculate_max_iterations(
+        error.error_class, settings.nightwatch_max_iterations
+    )
+    logger.info(
+        f"  Error class {error.error_class} → max_iterations={max_iterations} "
+        f"(ceiling: {settings.nightwatch_max_iterations})"
+    )
     total_tokens = 0
     api_calls = 0
+    token_budget = getattr(settings, "nightwatch_token_budget_per_error", 30000)
 
     while iteration < max_iterations:
         iteration += 1
         if iteration > 1:
             time.sleep(1.5)  # Rate-limit protection
 
-        logger.info(f"  Iteration {iteration}/{max_iterations}")
+        # Adaptive thinking budget
+        thinking_budget = _calculate_thinking_budget(
+            iteration, max_iterations, error.error_class
+        )
+        logger.info(f"  Iteration {iteration}/{max_iterations} (thinking: {thinking_budget})")
+
+        # Token budget enforcement
+        if total_tokens > token_budget:
+            logger.warning(
+                f"  Token budget {total_tokens}/{token_budget} — forcing wrap-up"
+            )
+            break
 
         response, tokens = _call_claude_with_retry(
             client=client,
             model=settings.nightwatch_model,
             messages=messages,
+            thinking_budget=thinking_budget,
         )
         total_tokens += tokens
         api_calls += 1
@@ -289,6 +389,52 @@ def _build_retry_seed(result: ErrorAnalysisResult) -> str:
     return "\n".join(parts)
 
 
+def _evaluate_analysis_quality(result: ErrorAnalysisResult) -> float:
+    """Score analysis quality (0.0-1.0) to decide if a retry pass is worthwhile.
+
+    Scores based on:
+    - Confidence level (low=0.0, medium=0.5, high=1.0)
+    - Root cause specificity (has non-generic root cause)
+    - Has fix with file changes
+    - Reasoning depth (length and detail)
+    - Next steps provided
+
+    Returns float 0.0-1.0 where < 0.5 suggests retry.
+    """
+    score = 0.0
+    a = result.analysis
+
+    # Confidence contributes up to 0.35
+    conf_scores = {"high": 0.35, "medium": 0.2, "low": 0.0}
+    score += conf_scores.get(str(a.confidence).lower(), 0.0)
+
+    # Root cause specificity — up to 0.25
+    if a.root_cause and a.root_cause != "Unknown" and len(a.root_cause) > 20:
+        score += 0.25
+    elif a.root_cause and len(a.root_cause) > 5:
+        score += 0.10
+
+    # Has fix with file changes — up to 0.20
+    if a.has_fix and a.file_changes:
+        score += 0.20
+    elif a.has_fix:
+        score += 0.10
+
+    # Reasoning depth — up to 0.10
+    if a.reasoning and len(a.reasoning) > 200:
+        score += 0.10
+    elif a.reasoning and len(a.reasoning) > 50:
+        score += 0.05
+
+    # Next steps provided — up to 0.10
+    if a.suggested_next_steps and len(a.suggested_next_steps) >= 2:
+        score += 0.10
+    elif a.suggested_next_steps:
+        score += 0.05
+
+    return min(score, 1.0)
+
+
 def _confidence_rank(confidence: str | Confidence) -> int:
     """Convert confidence level to numeric rank for comparison."""
     ranks = {"low": 0, "medium": 1, "high": 2}
@@ -306,6 +452,7 @@ def _call_claude_with_retry(
     messages: list[dict],
     max_retries: int = 5,
     base_delay: float = 15.0,
+    thinking_budget: int = 8000,
 ) -> tuple[Any, int]:
     """Call Claude with retry logic and prompt caching.
 
@@ -329,7 +476,7 @@ def _call_claude_with_retry(
                 messages=messages,
                 thinking={
                     "type": "enabled",
-                    "budget_tokens": 8000,
+                    "budget_tokens": thinking_budget,
                 },
             )
 
@@ -434,29 +581,32 @@ def _execute_single_tool(
     newrelic_client: Any,
 ) -> str:
     """Execute a single tool and return the result string."""
+    limit = TOOL_RESULT_LIMITS.get(tool_name, 8000)
+
     if tool_name == "read_file":
         content = github_client.read_file(tool_input["path"])
-        return content if content is not None else f"File not found: {tool_input['path']}"
+        result = content if content is not None else f"File not found: {tool_input['path']}"
+        return _truncate_tool_result(result, limit)
 
     if tool_name == "search_code":
         results = github_client.search_code(
             tool_input["query"], tool_input.get("file_extension")
         )
-        return json.dumps(results, indent=2) if results else "No matches found"
+        result = json.dumps(results, indent=2) if results else "No matches found"
+        return _truncate_tool_result(result, limit)
 
     if tool_name == "list_directory":
         contents = github_client.list_directory(tool_input["path"])
         if contents:
-            return json.dumps(contents, indent=2)
+            return _truncate_tool_result(json.dumps(contents, indent=2), limit)
         return f"Directory not found: {tool_input['path']}"
 
     if tool_name == "get_error_traces":
-        # Return pre-fetched traces (avoids extra NR calls during analysis)
         trace_data = {
             "transaction_errors": traces.transaction_errors,
             "error_traces": traces.error_traces,
         }
-        return json.dumps(trace_data, indent=2)
+        return _truncate_tool_result(json.dumps(trace_data, indent=2), limit)
 
     return f"Unknown tool: {tool_name}"
 

@@ -46,6 +46,27 @@ class Settings(BaseSettings):
     nightwatch_knowledge_dir: str = "nightwatch/knowledge"
     nightwatch_compound_enabled: bool = True
 
+    # Context efficiency
+    nightwatch_token_budget_per_error: int = 30000
+    nightwatch_total_token_budget: int = 200000
+
+    # Compound product integration
+    nightwatch_health_report: bool = True
+    nightwatch_quality_tracking: bool = True
+    nightwatch_schedule: str = "0 6 * * 1-5"  # Default: 6 AM weekdays
+    nightwatch_schedule_timezone: str = "UTC"
+
+    # Maintenance workflows
+    nightwatch_workflows: str = "errors"  # Comma-separated workflow names
+    nightwatch_guardrails_output: str | None = None  # Path for guardrails.md
+    nightwatch_history_dir: str = "~/.nightwatch"  # Run history directory
+
+    # Optional — Opik observability (disabled if not set)
+    opik_api_key: str | None = None
+    opik_workspace: str | None = None
+    opik_project_name: str = "nightwatch"
+    opik_enabled: bool = True  # Can disable even if API key is set
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

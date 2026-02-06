@@ -10,6 +10,10 @@ from typing import Any
 
 import anthropic
 
+# Import workflow modules to trigger @register decorators
+import nightwatch.workflows.ci_doctor  # noqa: F401
+import nightwatch.workflows.errors  # noqa: F401
+import nightwatch.workflows.patterns  # noqa: F401
 from nightwatch.analyzer import analyze_error
 from nightwatch.config import get_settings
 from nightwatch.correlation import (
@@ -17,10 +21,14 @@ from nightwatch.correlation import (
     fetch_recent_merged_prs,
     format_correlated_prs,
 )
-from nightwatch.github import GitHubClient
+from nightwatch.github import CodeCache, GitHubClient
+from nightwatch.guardrails import generate_guardrails
+from nightwatch.health import HealthReport
+from nightwatch.history import save_run
 from nightwatch.knowledge import (
     compound_result,
     rebuild_index,
+    save_error_pattern,
     search_prior_knowledge,
     update_result_metadata,
 )
@@ -43,9 +51,11 @@ from nightwatch.patterns import (
     suggest_ignore_updates,
     write_pattern_doc,
 )
+from nightwatch.quality import QualityTracker
 from nightwatch.research import ResearchContext, research_error
 from nightwatch.slack import SlackClient
 from nightwatch.validation import validate_file_changes
+from nightwatch.workflows.registry import list_registered
 
 logger = logging.getLogger("nightwatch")
 
@@ -74,6 +84,11 @@ def run(
     """
     settings = get_settings()
     start_time = time.time()
+
+    # Initialize Opik tracing (no-op if unconfigured)
+    from nightwatch.observability import configure_opik
+
+    configure_opik()
 
     # Apply overrides
     since = since or settings.nightwatch_since
@@ -171,6 +186,15 @@ def run(
         multi_pass_retries = 0
         pr_validation_failures = 0
 
+        # Self-health and quality tracking
+        health = HealthReport()
+        health.check_configuration()
+        quality_tracker = QualityTracker()
+
+        # Cross-error context and code cache
+        cross_error_context: list[str] = []
+        code_cache = CodeCache()
+
         for i, error in enumerate(top_errors, 1):
             logger.info(
                 f"Analyzing {i}/{len(top_errors)}: "
@@ -178,6 +202,14 @@ def run(
                 f"({error.occurrences} occurrences)"
             )
             try:
+                # Build cross-error prior context
+                prior_text = None
+                if cross_error_context:
+                    recent = cross_error_context[-4:]
+                    prior_text = (
+                        "Previously Analyzed Errors:\n" + "\n".join(recent)
+                    )
+
                 result = analyze_error(
                     error=error,
                     traces=traces_map[id(error)],
@@ -187,20 +219,64 @@ def run(
                     prior_analyses=prior_knowledge_map.get(id(error)),
                     research_context=research_map.get(id(error)),
                     agent_name=agent_name,
+                    prior_context=prior_text,
                 )
                 analyses.append(result)
+
+                # Build cross-error summary for subsequent analyses
+                root = (
+                    result.analysis.root_cause[:200]
+                    if result.analysis.root_cause
+                    else "Unknown"
+                )
+                files = ", ".join(
+                    fc.path
+                    for fc in (result.analysis.file_changes[:3])
+                ) if result.analysis.file_changes else ""
+                summary = (
+                    f"Error #{i}: {error.error_class} in "
+                    f"{error.transaction} — Root cause: {root}"
+                )
+                if files:
+                    summary += f". Files: {files}"
+                cross_error_context.append(summary)
 
                 # Track multi-pass retries for reporting
                 if result.pass_count > 1:
                     multi_pass_retries += 1
 
+                # Record health + quality signals
+                health.record_analysis(success=True, tokens_used=result.tokens_used)
+                quality_tracker.record_signal(
+                    error_class=error.error_class,
+                    transaction=error.transaction,
+                    confidence=_confidence_float(result.analysis.confidence),
+                    iterations_used=result.iterations,
+                    tokens_used=result.tokens_used,
+                    had_file_changes=bool(result.analysis.file_changes),
+                    had_root_cause=bool(result.analysis.root_cause),
+                )
+
             except Exception as e:
                 logger.error(f"Analysis failed for {error.error_class}: {e}")
+                health.record_analysis(success=False, error_msg=str(e))
                 # Fail forward — skip this error, continue
 
             # Brief pause between errors to help with rate limits
             if i < len(top_errors):
                 time.sleep(5)
+
+        # Log code cache stats
+        logger.info(f"Code cache: {code_cache.stats}")
+
+        # Save quality signals and log health
+        quality_tracker.save()
+        health_report_data = health.generate()
+        logger.info(
+            f"Health: {health_report_data['health']['status']} | "
+            f"Success rate: {health_report_data['analysis']['success_rate']}% | "
+            f"Cost: ${health_report_data['resources']['estimated_cost_usd']:.4f}"
+        )
 
         # ------------------------------------------------------------------
         # Step 5: Build report
@@ -381,6 +457,24 @@ def run(
                 for a_result in analyses:
                     compound_result(a_result)
 
+                # Auto-save high-confidence error patterns
+                for a_result in analyses:
+                    if (
+                        a_result.quality_score >= 0.7
+                        and a_result.analysis.root_cause
+                    ):
+                        try:
+                            save_error_pattern(
+                                error_class=a_result.error.error_class,
+                                transaction=a_result.error.transaction,
+                                pattern_description=(
+                                    a_result.analysis.root_cause[:500]
+                                ),
+                                confidence=str(a_result.analysis.confidence),
+                            )
+                        except Exception as e:
+                            logger.warning(f"  Error pattern save failed: {e}")
+
                 # Persist detected patterns
                 for pattern in report.patterns:
                     try:
@@ -406,6 +500,51 @@ def run(
                 rebuild_index()
             except Exception as e:
                 logger.error(f"Knowledge compounding failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 13: Save run history for cross-run pattern analysis
+        # ------------------------------------------------------------------
+        try:
+            run_data = {
+                "errors_analyzed": [
+                    {
+                        "error_class": a.error.error_class,
+                        "transaction": a.error.transaction,
+                        "confidence": str(a.analysis.confidence),
+                        "has_fix": a.analysis.has_fix,
+                        "root_cause": (a.analysis.root_cause or "")[:200],
+                    }
+                    for a in analyses
+                ],
+                "patterns_detected": [
+                    {
+                        "title": p.title,
+                        "error_classes": p.error_classes,
+                        "occurrences": p.occurrences,
+                    }
+                    for p in report.patterns
+                ],
+                "issues_created": len(issues_created),
+                "pr_created": pr_result is not None,
+                "total_tokens_used": report.total_tokens_used,
+            }
+            save_run(run_data)
+        except Exception as e:
+            logger.warning(f"Failed to save run history: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 14: Generate Ralph guardrails if configured
+        # ------------------------------------------------------------------
+        guardrails_path = settings.nightwatch_guardrails_output
+        if guardrails_path:
+            try:
+                generate_guardrails(run_data, output_path=guardrails_path)
+                logger.info(f"Guardrails written to {guardrails_path}")
+            except Exception as e:
+                logger.warning(f"Guardrails generation failed: {e}")
+
+        # Log registered workflows
+        logger.info(f"Registered workflows: {list_registered()}")
 
         elapsed_final = time.time() - start_time
         report.run_duration_seconds = elapsed_final
@@ -634,6 +773,11 @@ Respond with the same JSON structure as the original analysis, but with correcte
     except Exception as e:
         logger.error(f"  Correction failed: {e}")
         return None
+
+
+def _confidence_float(confidence: str) -> float:
+    """Convert confidence string to float for quality tracking."""
+    return {"high": 0.9, "medium": 0.6, "low": 0.2}.get(str(confidence).lower(), 0.0)
 
 
 def _print_dry_run_summary(report: RunReport) -> None:

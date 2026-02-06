@@ -147,18 +147,35 @@ def _check() -> int:
 
 def _run(args: argparse.Namespace) -> int:
     """Execute the analysis pipeline."""
-    from nightwatch.runner import run
+    from nightwatch.config import get_settings
+
+    settings = get_settings()
 
     try:
-        run(
-            since=args.since,
-            max_errors=args.max_errors,
-            max_issues=args.max_issues,
-            dry_run=args.dry_run,
-            verbose=args.verbose,
-            model=args.model,
-            agent_name=args.agent,
-        )
+        if settings.nightwatch_pipeline_v2:
+            from nightwatch.runner import run_v2
+
+            run_v2(
+                since=args.since,
+                max_errors=args.max_errors,
+                max_issues=args.max_issues,
+                dry_run=args.dry_run,
+                verbose=args.verbose,
+                model=args.model,
+                agent_name=args.agent,
+            )
+        else:
+            from nightwatch.runner import run
+
+            run(
+                since=args.since,
+                max_errors=args.max_errors,
+                max_issues=args.max_issues,
+                dry_run=args.dry_run,
+                verbose=args.verbose,
+                model=args.model,
+                agent_name=args.agent,
+            )
         return 0
     except KeyboardInterrupt:
         print("\nInterrupted.")

@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     nightwatch_guardrails_output: str | None = None  # Path for guardrails.md
     nightwatch_history_dir: str = "~/.nightwatch"  # Run history directory
 
+    # Pipeline V2 (phase-based execution — GANDALF-001d)
+    nightwatch_pipeline_v2: bool = False
+    nightwatch_pipeline_fallback: bool = True
+
     # Optional — Opik observability (disabled if not set)
     opik_api_key: str | None = None
     opik_workspace: str | None = None

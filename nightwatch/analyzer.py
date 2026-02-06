@@ -154,8 +154,12 @@ def analyze_error(
 # ---------------------------------------------------------------------------
 
 _SIMPLE_ERRORS = [
-    "nomethoderror", "nameerror", "argumenterror",
-    "typeerror", "keyerror", "attributeerror",
+    "nomethoderror",
+    "nameerror",
+    "argumenterror",
+    "typeerror",
+    "keyerror",
+    "attributeerror",
 ]
 _AUTH_ERRORS = ["notauthorized", "forbidden", "authentication", "unauthorized"]
 _DB_ERRORS = ["activerecord", "pg::", "statementinvalid", "deadlock", "mysql"]
@@ -291,16 +295,12 @@ def _single_pass(
             time.sleep(1.5)  # Rate-limit protection
 
         # Adaptive thinking budget
-        thinking_budget = _calculate_thinking_budget(
-            iteration, max_iterations, error.error_class
-        )
+        thinking_budget = _calculate_thinking_budget(iteration, max_iterations, error.error_class)
         logger.info(f"  Iteration {iteration}/{max_iterations} (thinking: {thinking_budget})")
 
         # Token budget enforcement
         if total_tokens > token_budget:
-            logger.warning(
-                f"  Token budget {total_tokens}/{token_budget} — forcing wrap-up"
-            )
+            logger.warning(f"  Token budget {total_tokens}/{token_budget} — forcing wrap-up")
             break
 
         response, tokens = _call_claude_with_retry(
@@ -316,14 +316,18 @@ def _single_pass(
             tool_results = _execute_tools(
                 response.content, error, traces, github_client, newrelic_client
             )
-            messages.append({
-                "role": "assistant",
-                "content": _serialize_content(response.content),
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": _serialize_content(response.content),
+                }
+            )
             messages.append({"role": "user", "content": tool_results})
 
-            # Compress conversation if getting long
-            if iteration > 6 and len(messages) > 8:
+            # Server-side context editing handles this automatically via
+            # clear_tool_uses_20250919 and clear_thinking_20251015.
+            # Keep manual compression as a safety net for very long conversations.
+            if iteration > 10 and len(messages) > 16:
                 messages = _compress_conversation(messages)
         else:
             # Claude is done — parse structured output
@@ -456,29 +460,68 @@ def _call_claude_with_retry(
 ) -> tuple[Any, int]:
     """Call Claude with retry logic and prompt caching.
 
+    When context editing is enabled (nightwatch_context_editing=True),
+    uses the beta API with server-side context management to automatically
+    clear old thinking blocks and tool results.
+
     Returns (response, total_tokens_used).
     """
+    settings = get_settings()
     last_error: Exception | None = None
+
+    # Build context management config when enabled
+    context_management = None
+    if getattr(settings, "nightwatch_context_editing", True):
+        context_management = {
+            "edits": [
+                {
+                    "type": "clear_thinking_20251015",
+                    "keep": {"type": "thinking_turns", "value": 2},
+                },
+                {
+                    "type": "clear_tool_uses_20250919",
+                    "trigger": {"type": "input_tokens", "value": 30000},
+                    "keep": {"type": "tool_uses", "value": 4},
+                    "clear_at_least": {"type": "input_tokens", "value": 5000},
+                },
+            ]
+        }
+
+    system_block = [
+        {
+            "type": "text",
+            "text": SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    thinking_config = {
+        "type": "enabled",
+        "budget_tokens": thinking_budget,
+    }
 
     for attempt in range(max_retries):
         try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=16384,
-                system=[
-                    {
-                        "type": "text",
-                        "text": SYSTEM_PROMPT,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                tools=TOOLS,
-                messages=messages,
-                thinking={
-                    "type": "enabled",
-                    "budget_tokens": thinking_budget,
-                },
-            )
+            # Use beta API when context editing is enabled, otherwise standard API
+            if context_management:
+                response = client.beta.messages.create(
+                    model=model,
+                    max_tokens=16384,
+                    betas=["context-management-2025-06-27"],
+                    system=system_block,
+                    tools=TOOLS,
+                    messages=messages,
+                    thinking=thinking_config,
+                    context_management=context_management,
+                )
+            else:
+                response = client.messages.create(
+                    model=model,
+                    max_tokens=16384,
+                    system=system_block,
+                    tools=TOOLS,
+                    messages=messages,
+                    thinking=thinking_config,
+                )
 
             input_tokens = getattr(response.usage, "input_tokens", 0)
             output_tokens = getattr(response.usage, "output_tokens", 0)
@@ -490,15 +533,25 @@ def _call_claude_with_retry(
             if cache_create:
                 logger.debug(f"  Cache write: {cache_create} tokens cached")
 
+            # Log context editing savings
+            ctx_mgmt = getattr(response, "context_management", None)
+            if ctx_mgmt and hasattr(ctx_mgmt, "applied_edits"):
+                for edit in ctx_mgmt.applied_edits:
+                    if hasattr(edit, "cleared_input_tokens"):
+                        logger.info(
+                            f"  Context edit ({edit.type}): "
+                            f"cleared {edit.cleared_input_tokens} tokens"
+                        )
+
             return response, input_tokens + output_tokens
 
         except anthropic.APIStatusError as e:
             last_error = e
             if e.status_code in (429, 529):
                 # Check for retry-after header
-                retry_after = getattr(
-                    getattr(e, "response", None), "headers", {}
-                ).get("retry-after")
+                retry_after = getattr(getattr(e, "response", None), "headers", {}).get(
+                    "retry-after"
+                )
                 if retry_after:
                     delay = float(retry_after) + random.uniform(1, 5)
                 else:
@@ -555,19 +608,23 @@ def _execute_tools(
             result = _execute_single_tool(
                 tool_name, tool_input, error, traces, github_client, newrelic_client
             )
-            results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": result,
-            })
+            results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                }
+            )
         except Exception as e:
             logger.error(f"    Tool error: {e}")
-            results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": f"Error: {e}",
-                "is_error": True,
-            })
+            results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": f"Error: {e}",
+                    "is_error": True,
+                }
+            )
 
     return results
 
@@ -589,9 +646,7 @@ def _execute_single_tool(
         return _truncate_tool_result(result, limit)
 
     if tool_name == "search_code":
-        results = github_client.search_code(
-            tool_input["query"], tool_input.get("file_extension")
-        )
+        results = github_client.search_code(tool_input["query"], tool_input.get("file_extension"))
         result = json.dumps(results, indent=2) if results else "No matches found"
         return _truncate_tool_result(result, limit)
 
@@ -719,12 +774,14 @@ def _serialize_content(content: list) -> list[dict]:
         if block.type == "text":
             result.append({"type": "text", "text": block.text})
         elif block.type == "tool_use":
-            result.append({
-                "type": "tool_use",
-                "id": block.id,
-                "name": block.name,
-                "input": block.input,
-            })
+            result.append(
+                {
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                }
+            )
         elif block.type == "thinking":
             # Skip thinking blocks in conversation history
             pass

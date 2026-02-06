@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     nightwatch_token_budget_per_error: int = 30000
     nightwatch_total_token_budget: int = 200000
 
+    # Context efficiency — beta context editing (Phase 2)
+    nightwatch_context_editing: bool = True
+
+    # Batch mode (50% cost reduction for non-urgent runs)
+    nightwatch_batch_mode: bool = False
+
     # Compound product integration
     nightwatch_health_report: bool = True
     nightwatch_quality_tracking: bool = True

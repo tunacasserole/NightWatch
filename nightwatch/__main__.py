@@ -15,8 +15,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         prog="nightwatch",
         description=(
-            "AI-powered production error analysis"
-            " — run once, analyze everything, report, done."
+            "AI-powered production error analysis — run once, analyze everything, report, done."
         ),
     )
     sub = parser.add_subparsers(dest="command")
@@ -26,26 +25,47 @@ def main() -> int:
     run_parser.add_argument("--since", default=None, help="Lookback period (e.g. 24h, 12h)")
     run_parser.add_argument("--max-errors", type=int, default=None, help="Max errors to analyze")
     run_parser.add_argument(
-        "--max-issues", type=int, default=None,
+        "--max-issues",
+        type=int,
+        default=None,
         help="Max GitHub issues to create",
     )
     run_parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Analyze only, no issues/PRs/Slack",
     )
     run_parser.add_argument("--verbose", action="store_true", help="Show iteration details")
     run_parser.add_argument("--model", default=None, help="Override Claude model")
     run_parser.add_argument(
-        "--agent", default="base-analyzer",
+        "--agent",
+        default="base-analyzer",
         help="Agent config name (from nightwatch/agents/*.md)",
     )
     run_parser.add_argument(
-        "--workflows", default=None,
+        "--workflows",
+        default=None,
         help="Comma-separated workflow names (default: errors)",
     )
     run_parser.add_argument(
-        "--guardrails-output", default=None,
+        "--guardrails-output",
+        default=None,
         help="Path to write guardrails.md (Ralph integration)",
+    )
+    run_parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Submit errors for batch triage (50%% cost savings), then exit",
+    )
+    run_parser.add_argument(
+        "--collect",
+        action="store_true",
+        help="Collect results from a previous --batch submission",
+    )
+    run_parser.add_argument(
+        "--batch-id",
+        default=None,
+        help="Specific batch ID to collect (default: most recent)",
     )
 
     # --- check ---
@@ -65,6 +85,9 @@ def main() -> int:
         args.agent = "base-analyzer"
         args.workflows = None
         args.guardrails_output = None
+        args.batch = False
+        args.collect = False
+        args.batch_id = None
 
     # Set up logging
     level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
@@ -90,6 +113,7 @@ def _check() -> int:
     # Config
     try:
         from nightwatch.config import get_settings
+
         settings = get_settings()
         print("  [OK] Config loaded from .env")
     except Exception as e:
@@ -99,6 +123,7 @@ def _check() -> int:
     # New Relic
     try:
         from nightwatch.newrelic import NewRelicClient
+
         nr = NewRelicClient()
         result = nr.query_nrql("SELECT count(*) FROM TransactionError SINCE 1 hour ago")
         nr.close()
@@ -110,6 +135,7 @@ def _check() -> int:
     # GitHub
     try:
         from nightwatch.github import GitHubClient
+
         gh = GitHubClient()
         repo = gh.repo
         print(f"  [OK] GitHub: {repo.full_name} ({repo.default_branch})")
@@ -119,6 +145,7 @@ def _check() -> int:
     # Slack
     try:
         from nightwatch.slack import SlackClient
+
         slack = SlackClient()
         uid = slack._get_user_id(settings.slack_notify_user)
         if uid:
@@ -131,6 +158,7 @@ def _check() -> int:
     # Claude
     try:
         import anthropic
+
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         client.messages.create(
             model=settings.nightwatch_model,

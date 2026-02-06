@@ -10,6 +10,10 @@ from typing import Any
 
 import anthropic
 
+# Import workflow modules to trigger @register decorators
+import nightwatch.workflows.ci_doctor  # noqa: F401
+import nightwatch.workflows.errors  # noqa: F401
+import nightwatch.workflows.patterns  # noqa: F401
 from nightwatch.analyzer import analyze_error
 from nightwatch.config import get_settings
 from nightwatch.correlation import (
@@ -18,7 +22,9 @@ from nightwatch.correlation import (
     format_correlated_prs,
 )
 from nightwatch.github import CodeCache, GitHubClient
+from nightwatch.guardrails import generate_guardrails
 from nightwatch.health import HealthReport
+from nightwatch.history import save_run
 from nightwatch.knowledge import (
     compound_result,
     rebuild_index,
@@ -48,6 +54,7 @@ from nightwatch.quality import QualityTracker
 from nightwatch.research import ResearchContext, research_error
 from nightwatch.slack import SlackClient
 from nightwatch.validation import validate_file_changes
+from nightwatch.workflows.registry import list_registered
 
 logger = logging.getLogger("nightwatch")
 
@@ -474,6 +481,51 @@ def run(
                 rebuild_index()
             except Exception as e:
                 logger.error(f"Knowledge compounding failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 13: Save run history for cross-run pattern analysis
+        # ------------------------------------------------------------------
+        try:
+            run_data = {
+                "errors_analyzed": [
+                    {
+                        "error_class": a.error.error_class,
+                        "transaction": a.error.transaction,
+                        "confidence": str(a.analysis.confidence),
+                        "has_fix": a.analysis.has_fix,
+                        "root_cause": (a.analysis.root_cause or "")[:200],
+                    }
+                    for a in analyses
+                ],
+                "patterns_detected": [
+                    {
+                        "title": p.title,
+                        "error_classes": p.error_classes,
+                        "occurrences": p.occurrences,
+                    }
+                    for p in report.patterns
+                ],
+                "issues_created": len(issues_created),
+                "pr_created": pr_result is not None,
+                "total_tokens_used": report.total_tokens_used,
+            }
+            save_run(run_data)
+        except Exception as e:
+            logger.warning(f"Failed to save run history: {e}")
+
+        # ------------------------------------------------------------------
+        # Step 14: Generate Ralph guardrails if configured
+        # ------------------------------------------------------------------
+        guardrails_path = settings.nightwatch_guardrails_output
+        if guardrails_path:
+            try:
+                generate_guardrails(run_data, output_path=guardrails_path)
+                logger.info(f"Guardrails written to {guardrails_path}")
+            except Exception as e:
+                logger.warning(f"Guardrails generation failed: {e}")
+
+        # Log registered workflows
+        logger.info(f"Registered workflows: {list_registered()}")
 
         elapsed_final = time.time() - start_time
         report.run_duration_seconds = elapsed_final

@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     nightwatch_schedule: str = "0 6 * * 1-5"  # Default: 6 AM weekdays
     nightwatch_schedule_timezone: str = "UTC"
 
+    # Maintenance workflows
+    nightwatch_workflows: str = "errors"  # Comma-separated workflow names
+    nightwatch_guardrails_output: str | None = None  # Path for guardrails.md
+    nightwatch_history_dir: str = "~/.nightwatch"  # Run history directory
+
     # Optional — Opik observability (disabled if not set)
     opik_api_key: str | None = None
     opik_workspace: str | None = None

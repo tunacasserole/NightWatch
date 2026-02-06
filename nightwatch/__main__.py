@@ -39,6 +39,14 @@ def main() -> int:
         "--agent", default="base-analyzer",
         help="Agent config name (from nightwatch/agents/*.md)",
     )
+    run_parser.add_argument(
+        "--workflows", default=None,
+        help="Comma-separated workflow names (default: errors)",
+    )
+    run_parser.add_argument(
+        "--guardrails-output", default=None,
+        help="Path to write guardrails.md (Ralph integration)",
+    )
 
     # --- check ---
     sub.add_parser("check", help="Validate config and API connectivity")
@@ -55,6 +63,8 @@ def main() -> int:
         args.verbose = False
         args.model = None
         args.agent = "base-analyzer"
+        args.workflows = None
+        args.guardrails_output = None
 
     # Set up logging
     level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO

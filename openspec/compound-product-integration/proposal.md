@@ -1,7 +1,9 @@
 # OpenSpec Proposal: compound-product Integration
 
 **ID**: CP-001
-**Status**: Approved
+**Status**: Completed
+**Completed**: 2026-02-06
+**PR**: #4 (feat/all-specs → main)
 **Author**: Claude (AI Assistant)
 **Date**: 2026-02-05
 **Scope**: Development workflow tooling / autonomous improvement loop

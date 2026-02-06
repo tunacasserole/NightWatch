@@ -1,7 +1,9 @@
 # OPENSPEC: Context Efficiency & Conversation Management
 
-**Status**: Approved
+**Status**: Completed
 **Approved**: 2026-02-05
+**Completed**: 2026-02-06
+**PR**: #4 (feat/all-specs → main)
 **Author**: Claude (AI-assisted)
 **Date**: 2026-02-05
 **Scope**: NightWatch conversation compaction, token efficiency, turn limiting, context management

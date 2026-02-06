@@ -3,7 +3,9 @@
 **ID**: MAINT-001-PLAN
 **Parent**: [MAINT-001 Proposal](./proposal.md) | [MAINT-001-IMPL Spec](./implementation.md)
 **Date**: 2026-02-05
-**Status**: Approved
+**Status**: Completed
+**Completed**: 2026-02-06
+**PR**: #4 (feat/all-specs → main)
 
 ---
 

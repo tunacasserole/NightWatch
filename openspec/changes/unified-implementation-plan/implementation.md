@@ -1,8 +1,10 @@
 # NightWatch — Unified Implementation Plan
 
 **ID**: IMPL-001
-**Status**: Approved
+**Status**: Completed
 **Approved Date**: 2026-02-05
+**Completed**: 2026-02-06
+**PR**: #4 (feat/all-specs → main)
 **Author**: Claude (AI Assistant)
 **Date**: 2026-02-05
 **Scope**: NightWatch pipeline enhancements — multi-pass analysis, knowledge compounding, quality gates

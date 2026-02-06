@@ -1,8 +1,10 @@
 # Opik Observability — Implementation Plan
 
 **Proposal Reference ID**: OPIK-001
-**Status**: Approved
+**Status**: Completed
 **Approved**: 2026-02-05
+**Completed**: 2026-02-06
+**PR**: #4 (feat/all-specs → main)
 
 ---
 

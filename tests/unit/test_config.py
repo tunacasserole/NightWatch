@@ -117,14 +117,22 @@ class TestSettingsCaching:
 
 
 class TestSettingsValidation:
-    def test_missing_required_field_raises(self, monkeypatch):
+    def test_missing_required_field_raises(self, monkeypatch, tmp_path):
+        from nightwatch.config import Settings
+
         get_settings.cache_clear()
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        empty_env = tmp_path / ".env"
+        empty_env.write_text("")
         with pytest.raises(Exception):
-            get_settings()
+            Settings(_env_file=str(empty_env))
 
-    def test_invalid_int_raises(self, monkeypatch):
+    def test_invalid_int_raises(self, monkeypatch, tmp_path):
+        from nightwatch.config import Settings
+
         get_settings.cache_clear()
         monkeypatch.setenv("NIGHTWATCH_MAX_ERRORS", "not-a-number")
+        empty_env = tmp_path / ".env"
+        empty_env.write_text("")
         with pytest.raises(Exception):
-            get_settings()
+            Settings(_env_file=str(empty_env))

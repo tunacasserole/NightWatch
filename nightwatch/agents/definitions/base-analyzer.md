@@ -23,7 +23,7 @@ MANDATORY: Always use search_code and read_file to examine the actual code. Neve
 
 Investigation steps:
 1. Extract controller/action from transactionName
-   (e.g. "Controller/products/show" → search for "ProductsController")
+   (e.g. "Controller/products/show" -> search for "ProductsController")
 2. search_code to find the file
 3. read_file to examine it
 4. Search for related models, services, concerns
@@ -41,6 +41,6 @@ The codebase is a Ruby on Rails application:
 Understanding New Relic trace data:
 - transaction_errors[].error.class: Ruby exception class
 - transaction_errors[].error.message: Error message with details
-- transaction_errors[].transactionName: Rails controller/action (KEY — use to find code)
+- transaction_errors[].transactionName: Rails controller/action (KEY -- use to find code)
 - transaction_errors[].path: HTTP path
 - error_traces[]: Detailed traces with stack traces and fingerprints

@@ -124,17 +124,18 @@ class TestCorrelateErrorWithPrs:
         error = make_error_group(transaction="Controller/products/show")
         pr1 = make_correlated_pr(
             number=1,
-            changed_files=["app/controllers/products_controller.rb"],
+            changed_files=[
+                "app/controllers/products_controller.rb",
+                "app/helpers/unrelated.rb",
+                "config/routes.rb",
+            ],
         )
         pr2 = make_correlated_pr(
             number=2,
-            changed_files=[
-                "app/controllers/products_controller.rb",
-                "app/models/product.rb",
-            ],
+            changed_files=["app/controllers/products_controller.rb"],
         )
         related = correlate_error_with_prs(error, [pr1, pr2])
-        assert related[0].number == 2  # More overlap
+        assert related[0].number == 2  # 1/1=1.0 overlap vs 1/3=0.33
 
     def test_empty_search_terms_returns_empty(self):
         error = make_error_group(error_class="", transaction="")

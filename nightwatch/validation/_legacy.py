@@ -79,9 +79,7 @@ def _validate_single_change(
 
         # Very short content is suspicious
         if len(change.content.strip()) < 10:
-            warnings.append(
-                f"Very short content ({len(change.content)} chars) for {change.path}"
-            )
+            warnings.append(f"Very short content ({len(change.content)} chars) for {change.path}")
 
     if change.action == "modify":
         # File must exist
@@ -135,8 +133,6 @@ def _check_ruby_syntax(content: str) -> list[str]:
     if openers > 0 and enders == 0:
         issues.append("Ruby syntax: no 'end' keywords found (likely incomplete)")
     elif abs(openers - enders) > 2:
-        issues.append(
-            f"Ruby syntax: imbalanced blocks ({openers} openers vs {enders} ends)"
-        )
+        issues.append(f"Ruby syntax: imbalanced blocks ({openers} openers vs {enders} ends)")
 
     return issues

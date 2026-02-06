@@ -65,11 +65,9 @@ class TestCliArgParsing:
 
 class TestRunCommand:
     def test_success(self):
-        with patch("nightwatch.__main__.runner") as mock_runner_module:
-            with patch("nightwatch.runner.run") as mock_run:
-                mock_run.return_value = None
-                with patch("sys.argv", ["nightwatch", "run", "--dry-run"]):
-                    result = main()
+        with patch("nightwatch.runner.run", return_value=None):
+            with patch("sys.argv", ["nightwatch", "run", "--dry-run"]):
+                result = main()
         assert result == 0
 
     def test_keyboard_interrupt_returns_130(self):
@@ -114,10 +112,8 @@ class TestCheckCommand:
                 result = main()
             assert result == 0
 
-    def test_check_config_failure_returns_1(self, monkeypatch):
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        with patch("sys.argv", ["nightwatch", "check"]):
-            from nightwatch.config import get_settings
-            get_settings.cache_clear()
-            result = main()
+    def test_check_config_failure_returns_1(self):
+        with patch("nightwatch.config.get_settings", side_effect=ValueError("missing key")):
+            with patch("sys.argv", ["nightwatch", "check"]):
+                result = main()
         assert result == 1

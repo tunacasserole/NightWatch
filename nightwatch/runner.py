@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -40,6 +41,7 @@ from nightwatch.models import (
     RunContext,
     RunReport,
 )
+from nightwatch.types.orchestration import PipelineConfig
 from nightwatch.newrelic import (
     NewRelicClient,
     filter_errors,
@@ -778,6 +780,28 @@ Respond with the same JSON structure as the original analysis, but with correcte
 def _confidence_float(confidence: str) -> float:
     """Convert confidence string to float for quality tracking."""
     return {"high": 0.9, "medium": 0.6, "low": 0.2}.get(str(confidence).lower(), 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline V2 entry point (GANDALF-001d)
+# ---------------------------------------------------------------------------
+
+
+async def _run_v2_async(**kwargs) -> RunReport:
+    """Pipeline V2 entry point (async)."""
+    from nightwatch.orchestration.pipeline import Pipeline
+
+    config = PipelineConfig(
+        dry_run=kwargs.get("dry_run", False),
+        enable_fallback=get_settings().nightwatch_pipeline_fallback,
+    )
+    pipeline = Pipeline(config=config)
+    return await pipeline.execute(**kwargs)
+
+
+def run_v2(**kwargs) -> RunReport:
+    """Sync wrapper for Pipeline V2."""
+    return asyncio.run(_run_v2_async(**kwargs))
 
 
 def _print_dry_run_summary(report: RunReport) -> None:

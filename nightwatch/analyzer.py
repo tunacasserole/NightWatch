@@ -89,14 +89,19 @@ def analyze_error(
         agent_name=agent_name,
     )
 
+    # Quality gate: evaluate if retry is worthwhile
+    quality_score = _evaluate_analysis_quality(result)
+    logger.info(f"  Pass 1 quality score: {quality_score:.2f}")
+
     # Multi-pass retry logic
     if (
         settings.nightwatch_multi_pass_enabled
-        and result.analysis.confidence == Confidence.LOW
+        and quality_score < 0.5
         and settings.nightwatch_max_passes > 1
     ):
         logger.info(
-            f"  Pass 1 returned LOW confidence — retrying with seed knowledge "
+            f"  Pass 1 quality score {quality_score:.2f} below threshold — "
+            f"retrying with seed knowledge "
             f"(pass 2/{settings.nightwatch_max_passes})"
         )
 
@@ -129,6 +134,9 @@ def analyze_error(
         ):
             # Pass 2 didn't improve — keep pass 1's analysis but record the extra cost
             result.analysis = pass1_result.analysis
+
+    # Store final quality score
+    result.quality_score = _evaluate_analysis_quality(result)
 
     # Record to run context
     if run_context and settings.nightwatch_run_context_enabled:
@@ -379,6 +387,52 @@ def _build_retry_seed(result: ErrorAnalysisResult) -> str:
         "using different search strategies or examining additional code paths."
     )
     return "\n".join(parts)
+
+
+def _evaluate_analysis_quality(result: ErrorAnalysisResult) -> float:
+    """Score analysis quality (0.0-1.0) to decide if a retry pass is worthwhile.
+
+    Scores based on:
+    - Confidence level (low=0.0, medium=0.5, high=1.0)
+    - Root cause specificity (has non-generic root cause)
+    - Has fix with file changes
+    - Reasoning depth (length and detail)
+    - Next steps provided
+
+    Returns float 0.0-1.0 where < 0.5 suggests retry.
+    """
+    score = 0.0
+    a = result.analysis
+
+    # Confidence contributes up to 0.35
+    conf_scores = {"high": 0.35, "medium": 0.2, "low": 0.0}
+    score += conf_scores.get(str(a.confidence).lower(), 0.0)
+
+    # Root cause specificity — up to 0.25
+    if a.root_cause and a.root_cause != "Unknown" and len(a.root_cause) > 20:
+        score += 0.25
+    elif a.root_cause and len(a.root_cause) > 5:
+        score += 0.10
+
+    # Has fix with file changes — up to 0.20
+    if a.has_fix and a.file_changes:
+        score += 0.20
+    elif a.has_fix:
+        score += 0.10
+
+    # Reasoning depth — up to 0.10
+    if a.reasoning and len(a.reasoning) > 200:
+        score += 0.10
+    elif a.reasoning and len(a.reasoning) > 50:
+        score += 0.05
+
+    # Next steps provided — up to 0.10
+    if a.suggested_next_steps and len(a.suggested_next_steps) >= 2:
+        score += 0.10
+    elif a.suggested_next_steps:
+        score += 0.05
+
+    return min(score, 1.0)
 
 
 def _confidence_rank(confidence: str | Confidence) -> int:

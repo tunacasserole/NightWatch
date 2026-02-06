@@ -28,6 +28,7 @@ from nightwatch.history import save_run
 from nightwatch.knowledge import (
     compound_result,
     rebuild_index,
+    save_error_pattern,
     search_prior_knowledge,
     update_result_metadata,
 )
@@ -455,6 +456,24 @@ def run(
                 logger.info("Persisting analysis results to knowledge base...")
                 for a_result in analyses:
                     compound_result(a_result)
+
+                # Auto-save high-confidence error patterns
+                for a_result in analyses:
+                    if (
+                        a_result.quality_score >= 0.7
+                        and a_result.analysis.root_cause
+                    ):
+                        try:
+                            save_error_pattern(
+                                error_class=a_result.error.error_class,
+                                transaction=a_result.error.transaction,
+                                pattern_description=(
+                                    a_result.analysis.root_cause[:500]
+                                ),
+                                confidence=str(a_result.analysis.confidence),
+                            )
+                        except Exception as e:
+                            logger.warning(f"  Error pattern save failed: {e}")
 
                 # Persist detected patterns
                 for pattern in report.patterns:

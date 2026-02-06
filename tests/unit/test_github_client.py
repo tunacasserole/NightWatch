@@ -8,11 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from github import GithubException
 
-from nightwatch.github import CodeCache, GitHubClient
+from nightwatch.github import CodeCache, GitHubClient, _build_issue_body, _build_issue_title
 from tests.factories import (
     make_analysis,
     make_error_analysis_result,
     make_error_group,
+    make_file_change,
 )
 
 # ---------------------------------------------------------------------------
@@ -146,10 +147,11 @@ class TestGitHubClientListDirectory:
             yield c
 
     def test_lists_files(self, client):
-        items = [
-            MagicMock(name="product.rb", path="app/models/product.rb", type="file"),
-            MagicMock(name="concerns", path="app/models/concerns", type="dir"),
-        ]
+        item1 = MagicMock(path="app/models/product.rb", type="file")
+        item1.configure_mock(name="product.rb")
+        item2 = MagicMock(path="app/models/concerns", type="dir")
+        item2.configure_mock(name="concerns")
+        items = [item1, item2]
         self.mock_repo.get_contents.return_value = items
         result = client.list_directory("app/models")
         assert len(result) == 2
@@ -307,3 +309,100 @@ class TestGetOpenNightwatchIssueCount:
             status=500, data={}, headers={}
         )
         assert client.get_open_nightwatch_issue_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# _build_issue_title — helper function tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildIssueTitle:
+    def test_full_title_with_class_tx_message(self):
+        error = make_error_group(
+            error_class="NoMethodError",
+            transaction="Controller/products/show",
+            message="undefined method 'name'",
+        )
+        analysis = make_analysis(title="Test")
+        title = _build_issue_title(error, analysis)
+        assert "NoMethodError" in title
+        assert "products/show" in title
+        assert "undefined method" in title
+
+    def test_class_and_tx_no_message(self):
+        error = make_error_group(
+            error_class="NoMethodError",
+            transaction="Controller/products/show",
+            message="",
+        )
+        analysis = make_analysis()
+        title = _build_issue_title(error, analysis)
+        assert title == "NoMethodError in products/show"
+
+    def test_class_only(self):
+        error = make_error_group(
+            error_class="NoMethodError",
+            transaction="",
+            message="",
+        )
+        analysis = make_analysis()
+        title = _build_issue_title(error, analysis)
+        assert title == "NoMethodError"
+
+    def test_analysis_title_fallback(self):
+        error = make_error_group(error_class="", transaction="", message="")
+        analysis = make_analysis(title="Custom Title")
+        title = _build_issue_title(error, analysis)
+        assert title == "Custom Title"
+
+    def test_production_error_fallback(self):
+        error = make_error_group(error_class="", transaction="", message="")
+        analysis = make_analysis(title="Unknown Error")
+        title = _build_issue_title(error, analysis)
+        assert title == "Production Error"
+
+    def test_long_message_truncated(self):
+        error = make_error_group(
+            error_class="E",
+            transaction="Controller/a/b",
+            message="x" * 100,
+        )
+        analysis = make_analysis()
+        title = _build_issue_title(error, analysis)
+        assert "..." in title
+
+
+# ---------------------------------------------------------------------------
+# _build_issue_body — helper function tests
+# ---------------------------------------------------------------------------
+
+
+class TestBuildIssueBody:
+    def test_includes_error_details(self):
+        result = make_error_analysis_result()
+        body = _build_issue_body(result)
+        assert "Error Details" in body
+        assert result.error.error_class in body
+        assert "NightWatch" in body
+
+    def test_includes_proposed_fix(self):
+        result = make_error_analysis_result()
+        result.analysis.has_fix = True
+        result.analysis.file_changes = [
+            make_file_change(path="app/models/product.rb", description="Add guard"),
+        ]
+        body = _build_issue_body(result)
+        assert "Proposed Fix" in body
+        assert "product.rb" in body
+
+    def test_no_proposed_fix_without_changes(self):
+        result = make_error_analysis_result()
+        result.analysis.has_fix = True
+        result.analysis.file_changes = []
+        body = _build_issue_body(result)
+        assert "Proposed Fix" not in body
+
+    def test_includes_correlated_prs(self):
+        result = make_error_analysis_result()
+        body = _build_issue_body(result, correlated_prs_section="## Related PRs\n| PR | Title |")
+        assert "Related PRs" in body

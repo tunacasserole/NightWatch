@@ -290,3 +290,59 @@ class TestAnalyzeErrorMultiPass:
 
         # Verify new analysis was recorded in run_context
         assert len(run_ctx.errors_analyzed) == 2  # Previous + new
+
+    @patch("nightwatch.analyzer._single_pass")
+    @patch("nightwatch.analyzer.get_settings")
+    def test_prior_context_merged_with_run_context(self, mock_settings, mock_single_pass):
+        """prior_context is merged with run_context seed."""
+        settings = MagicMock()
+        settings.nightwatch_multi_pass_enabled = False
+        settings.nightwatch_max_passes = 1
+        settings.nightwatch_run_context_enabled = True
+        settings.nightwatch_run_context_max_chars = 1500
+        mock_settings.return_value = settings
+
+        mock_single_pass.return_value = _make_result(confidence="high")
+
+        run_ctx = RunContext()
+        run_ctx.record_analysis("PrevError", "prev/tx", "prev cause")
+
+        from nightwatch.analyzer import analyze_error
+
+        analyze_error(
+            error=_make_error(),
+            traces=_make_traces(),
+            github_client=MagicMock(),
+            newrelic_client=MagicMock(),
+            run_context=run_ctx,
+            prior_context="Prior knowledge about this error",
+        )
+
+        call_kwargs = mock_single_pass.call_args[1]
+        assert "Prior knowledge" in call_kwargs["seed_context"]
+        assert "PrevError" in call_kwargs["seed_context"]
+
+    @patch("nightwatch.analyzer._single_pass")
+    @patch("nightwatch.analyzer.get_settings")
+    def test_prior_context_without_run_context(self, mock_settings, mock_single_pass):
+        """prior_context works alone without run_context."""
+        settings = MagicMock()
+        settings.nightwatch_multi_pass_enabled = False
+        settings.nightwatch_max_passes = 1
+        settings.nightwatch_run_context_enabled = False
+        mock_settings.return_value = settings
+
+        mock_single_pass.return_value = _make_result(confidence="high")
+
+        from nightwatch.analyzer import analyze_error
+
+        analyze_error(
+            error=_make_error(),
+            traces=_make_traces(),
+            github_client=MagicMock(),
+            newrelic_client=MagicMock(),
+            prior_context="Prior knowledge only",
+        )
+
+        call_kwargs = mock_single_pass.call_args[1]
+        assert call_kwargs["seed_context"] == "Prior knowledge only"

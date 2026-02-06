@@ -41,12 +41,11 @@ class TestConfigureOpik:
             use_local=False,
         )
 
-    def test_handles_import_error(self, monkeypatch):
+    def test_handles_configure_error(self, monkeypatch):
         get_settings.cache_clear()
         monkeypatch.setenv("OPIK_API_KEY", "test-key")
-        with patch.dict("sys.modules", {"opik": None}):
-            with patch("builtins.__import__", side_effect=ImportError("no opik")):
-                result = obs.configure_opik()
+        with patch("opik.configure", side_effect=RuntimeError("opik broken")):
+            result = obs.configure_opik()
         # Should catch exception and return False
         assert result is False
 

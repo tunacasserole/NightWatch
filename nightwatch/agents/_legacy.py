@@ -14,7 +14,7 @@ import yaml
 
 logger = logging.getLogger("nightwatch.agents")
 
-AGENTS_DIR = Path(__file__).parent / "agents"
+AGENTS_DIR = Path(__file__).parent / "definitions"
 
 
 # ---------------------------------------------------------------------------
@@ -67,9 +67,7 @@ def load_agent(name: str = "base-analyzer") -> AgentConfig:
         # Validate name matches filename
         fm_name = frontmatter.get("name", name)
         if fm_name != name:
-            logger.warning(
-                f"Agent file name mismatch: file={name}, frontmatter.name={fm_name}"
-            )
+            logger.warning(f"Agent file name mismatch: file={name}, frontmatter.name={fm_name}")
 
         return AgentConfig(
             name=fm_name,
